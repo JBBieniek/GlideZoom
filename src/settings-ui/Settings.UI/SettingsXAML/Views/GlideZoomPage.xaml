@@ -1,0 +1,226 @@
+<local:NavigablePage
+    x:Class="Microsoft.PowerToys.Settings.UI.Views.GlideZoomPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Microsoft.PowerToys.Settings.UI.Controls"
+    xmlns:local="using:Microsoft.PowerToys.Settings.UI.Helpers"
+    xmlns:tkcontrols="using:CommunityToolkit.WinUI.Controls"
+    xmlns:ui="using:CommunityToolkit.WinUI"
+    AutomationProperties.LandmarkType="Main">
+
+    <controls:SettingsPageControl
+        x:Uid="GlideZoom"
+        IsTabStop="False"
+        ModuleImageSource="ms-appx:///Assets/Settings/Modules/GlideZoom.png">
+        <controls:SettingsPageControl.ModuleContent>
+            <StackPanel ChildrenTransitions="{StaticResource SettingsCardsAnimations}" Orientation="Vertical">
+                <tkcontrols:SettingsCard Name="GlideZoom_Enable" x:Uid="GlideZoom_Enable" HeaderIcon="{ui:BitmapIcon Source=/Assets/Settings/Icons/GlideZoom.png}">
+                    <ToggleSwitch x:Uid="ToggleSwitch" IsOn="{x:Bind ViewModel.IsEnabled, Mode=TwoWay}" />
+                </tkcontrols:SettingsCard>
+                <controls:SettingsGroup x:Uid="GlideZoom_Controls" IsEnabled="{x:Bind ViewModel.IsEnabled, Mode=OneWay}">
+                    <tkcontrols:SettingsCard Name="GlideZoom_Shortcuts" x:Uid="GlideZoom_Shortcuts" ContentAlignment="Vertical">
+                        <TextBlock
+                            x:Uid="GlideZoom_ShortcutHelp"
+                            IsTextSelectionEnabled="True"
+                            TextWrapping="Wrap" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_WheelModifier" x:Uid="GlideZoom_WheelModifier">
+                        <ComboBox MinWidth="{StaticResource SettingActionControlMinWidth}" SelectedIndex="{x:Bind ViewModel.WheelModifier, Mode=TwoWay}">
+                            <ComboBoxItem x:Uid="GlideZoom_ModifierCtrlAlt" />
+                            <ComboBoxItem x:Uid="GlideZoom_ModifierCtrl" />
+                            <ComboBoxItem x:Uid="GlideZoom_ModifierAlt" />
+                            <ComboBoxItem x:Uid="GlideZoom_ModifierWin" />
+                        </ComboBox>
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_DoubleControl" x:Uid="GlideZoom_DoubleControl">
+                        <ToggleSwitch x:Uid="ToggleSwitch" IsOn="{x:Bind ViewModel.DoubleControl, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ModifiedDoubleClick" x:Uid="GlideZoom_ModifiedDoubleClick">
+                        <ToggleSwitch x:Uid="ToggleSwitch" IsOn="{x:Bind ViewModel.ModifiedDoubleClick, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ThreeFingerTouchpad" x:Uid="GlideZoom_ThreeFingerTouchpad">
+                        <ToggleSwitch x:Uid="ToggleSwitch" IsOn="{x:Bind ViewModel.ThreeFingerTouchpad, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                </controls:SettingsGroup>
+                <controls:SettingsGroup x:Uid="GlideZoom_Zoom" IsEnabled="{x:Bind ViewModel.IsEnabled, Mode=OneWay}">
+                    <tkcontrols:SettingsCard Name="GlideZoom_ZoomScope" x:Uid="GlideZoom_ZoomScope">
+                        <ComboBox MinWidth="{StaticResource SettingActionControlMinWidth}" SelectedIndex="{x:Bind ViewModel.ZoomScope, Mode=TwoWay}">
+                            <ComboBoxItem x:Uid="GlideZoom_ZoomScopeSelectedMonitor" />
+                            <ComboBoxItem x:Uid="GlideZoom_ZoomScopeAllMonitors" />
+                            <ComboBoxItem x:Uid="GlideZoom_ZoomScopeIndependentMonitors" />
+                        </ComboBox>
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_MaximumZoom" x:Uid="GlideZoom_MaximumZoom">
+                        <ComboBox MinWidth="{StaticResource SettingActionControlMinWidth}" SelectedIndex="{x:Bind ViewModel.MaximumZoomIndex, Mode=TwoWay}">
+                            <ComboBoxItem Content="2×" />
+                            <ComboBoxItem Content="4×" />
+                            <ComboBoxItem Content="8×" />
+                            <ComboBoxItem Content="16×" />
+                        </ComboBox>
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_Sensitivity" x:Uid="GlideZoom_Sensitivity">
+                        <ComboBox MinWidth="{StaticResource SettingActionControlMinWidth}" SelectedIndex="{x:Bind ViewModel.Sensitivity, Mode=TwoWay}">
+                            <ComboBoxItem x:Uid="GlideZoom_SensitivityGentle" />
+                            <ComboBoxItem x:Uid="GlideZoom_SensitivityBalanced" />
+                            <ComboBoxItem x:Uid="GlideZoom_SensitivityFast" />
+                        </ComboBox>
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ZoomMultiplier" x:Uid="GlideZoom_ZoomMultiplier">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="10"
+                            Maximum="100"
+                            Minimum="1"
+                            SmallChange="1"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.ZoomMultiplier, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ReverseDirection" x:Uid="GlideZoom_ReverseDirection">
+                        <ToggleSwitch x:Uid="ToggleSwitch" IsOn="{x:Bind ViewModel.ReverseDirection, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_WheelAcceleration" x:Uid="GlideZoom_WheelAcceleration">
+                        <ToggleSwitch x:Uid="ToggleSwitch" IsOn="{x:Bind ViewModel.WheelAcceleration, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_WheelAccelerationLimit" x:Uid="GlideZoom_WheelAccelerationLimit" IsEnabled="{x:Bind ViewModel.WheelAcceleration, Mode=OneWay}">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="1"
+                            Maximum="4"
+                            Minimum="1"
+                            SmallChange="1"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.WheelAccelerationLimit, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                </controls:SettingsGroup>
+                <controls:SettingsGroup x:Uid="GlideZoom_Pointer" IsEnabled="{x:Bind ViewModel.IsEnabled, Mode=OneWay}">
+                    <tkcontrols:SettingsCard Name="GlideZoom_ZoomScaledPointer" x:Uid="GlideZoom_ZoomScaledPointer">
+                        <ToggleSwitch x:Uid="ToggleSwitch" IsOn="{x:Bind ViewModel.ZoomScaledPointer, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_PointerSpeed" x:Uid="GlideZoom_PointerSpeed">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="25"
+                            Maximum="300"
+                            Minimum="25"
+                            SmallChange="5"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.PointerSpeed, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_CenterFollow" x:Uid="GlideZoom_CenterFollow">
+                        <ToggleSwitch x:Uid="ToggleSwitch" IsOn="{x:Bind ViewModel.CenterFollow, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_EdgePanMultiplier" x:Uid="GlideZoom_EdgePanMultiplier" IsEnabled="{x:Bind ViewModel.IsEdgePanEnabled, Mode=OneWay}">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="1"
+                            Maximum="10"
+                            Minimum="1"
+                            SmallChange="1"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.EdgePanMultiplier, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                </controls:SettingsGroup>
+                <controls:SettingsGroup x:Uid="GlideZoom_Indicator" IsEnabled="{x:Bind ViewModel.IsEnabled, Mode=OneWay}">
+                    <tkcontrols:SettingsCard Name="GlideZoom_ScopeIndicatorMode" x:Uid="GlideZoom_ScopeIndicatorMode">
+                        <ComboBox MinWidth="{StaticResource SettingActionControlMinWidth}" SelectedIndex="{x:Bind ViewModel.ScopeIndicatorMode, Mode=TwoWay}">
+                            <ComboBoxItem x:Uid="GlideZoom_IndicatorOff" />
+                            <ComboBoxItem x:Uid="GlideZoom_IndicatorMoving" />
+                            <ComboBoxItem x:Uid="GlideZoom_IndicatorShortcut" />
+                            <ComboBoxItem x:Uid="GlideZoom_IndicatorAlways" />
+                        </ComboBox>
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ScopeIndicatorStyle" x:Uid="GlideZoom_ScopeIndicatorStyle" IsEnabled="{x:Bind ViewModel.IsScopeIndicatorEnabled, Mode=OneWay}">
+                        <ComboBox MinWidth="{StaticResource SettingActionControlMinWidth}" SelectedIndex="{x:Bind ViewModel.ScopeIndicatorStyle, Mode=TwoWay}">
+                            <ComboBoxItem x:Uid="GlideZoom_IndicatorOverview" />
+                            <ComboBoxItem x:Uid="GlideZoom_IndicatorOutline" />
+                            <ComboBoxItem x:Uid="GlideZoom_IndicatorBoth" />
+                        </ComboBox>
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ScopeIndicatorSize" x:Uid="GlideZoom_ScopeIndicatorSize" IsEnabled="{x:Bind ViewModel.IsScopeIndicatorOverview, Mode=OneWay}">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="5"
+                            Maximum="35"
+                            Minimum="10"
+                            SmallChange="1"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.ScopeIndicatorSize, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_OverviewOpacity" x:Uid="GlideZoom_OverviewOpacity" IsEnabled="{x:Bind ViewModel.IsScopeIndicatorOverview, Mode=OneWay}">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="10"
+                            Maximum="100"
+                            Minimum="0"
+                            SmallChange="5"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.OverviewOpacity, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ScopeIndicatorOpacity" x:Uid="GlideZoom_ScopeIndicatorOpacity" IsEnabled="{x:Bind ViewModel.IsScopeIndicatorOutline, Mode=OneWay}">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="10"
+                            Maximum="90"
+                            Minimum="10"
+                            SmallChange="5"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.ScopeIndicatorOpacity, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ScopeIndicatorBorder" x:Uid="GlideZoom_ScopeIndicatorBorder" IsEnabled="{x:Bind ViewModel.IsScopeIndicatorEnabled, Mode=OneWay}">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="1"
+                            Maximum="8"
+                            Minimum="1"
+                            SmallChange="1"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.ScopeIndicatorBorder, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ScopeIndicatorDuration" x:Uid="GlideZoom_ScopeIndicatorDuration" IsEnabled="{x:Bind ViewModel.IsScopeIndicatorEnabled, Mode=OneWay}">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="500"
+                            Maximum="5000"
+                            Minimum="500"
+                            SmallChange="100"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.ScopeIndicatorDuration, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ScopeIndicatorDetails" x:Uid="GlideZoom_ScopeIndicatorDetails" IsEnabled="{x:Bind ViewModel.IsScopeIndicatorEnabled, Mode=OneWay}">
+                        <ToggleSwitch x:Uid="ToggleSwitch" IsOn="{x:Bind ViewModel.ScopeIndicatorDetails, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ScopeIndicatorX" x:Uid="GlideZoom_ScopeIndicatorX" IsEnabled="{x:Bind ViewModel.IsScopeIndicatorOverview, Mode=OneWay}">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="10"
+                            Maximum="100"
+                            Minimum="0"
+                            SmallChange="1"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.ScopeIndicatorX, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ScopeIndicatorY" x:Uid="GlideZoom_ScopeIndicatorY" IsEnabled="{x:Bind ViewModel.IsScopeIndicatorOverview, Mode=OneWay}">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="10"
+                            Maximum="100"
+                            Minimum="0"
+                            SmallChange="1"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.ScopeIndicatorY, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                    <tkcontrols:SettingsCard Name="GlideZoom_ScopeIndicatorFade" x:Uid="GlideZoom_ScopeIndicatorFade" IsEnabled="{x:Bind ViewModel.IsScopeIndicatorEnabled, Mode=OneWay}">
+                        <NumberBox
+                            MinWidth="{StaticResource SettingActionControlMinWidth}"
+                            LargeChange="100"
+                            Maximum="400"
+                            Minimum="0"
+                            SmallChange="10"
+                            SpinButtonPlacementMode="Compact"
+                            Value="{x:Bind ViewModel.ScopeIndicatorFade, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
+                </controls:SettingsGroup>
+            </StackPanel>
+        </controls:SettingsPageControl.ModuleContent>
+    </controls:SettingsPageControl>
+</local:NavigablePage>

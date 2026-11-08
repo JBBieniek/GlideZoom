@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <Import Project="$(RepoRoot)packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.props" Condition="Exists('$(RepoRoot)packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.props')" />
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{5F23580E-44BC-43DC-AB12-71C52A533BB5}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>GlideZoom</RootNamespace>
+    <UsePrecompiledHeaders>false</UsePrecompiledHeaders>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup>
+    <TargetName>PowerToys.GlideZoom</TargetName>
+    <OutDir>$(RepoRoot)$(Platform)\$(Configuration)\</OutDir>
+    <GenerateManifest>false</GenerateManifest>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_WIN32_WINNT=0x0A00;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(RepoRoot)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /bigobj</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
+      <AdditionalDependencies>user32.lib;shell32.lib;shlwapi.lib;windowsapp.lib;advapi32.lib;gdi32.lib;ole32.lib;wtsapi32.lib;uuid.lib;hid.lib;dwmapi.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;runtimeobject.lib;dcomp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="gpu_monitor_magnifier.cpp" />
+    <ClCompile Include="zoom_capture.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="control_channel.h" />
+    <ClInclude Include="cursor_coverage.h" />
+    <ClInclude Include="cursor_visibility_win32.h" />
+    <ClInclude Include="cursor_visibility.h" />
+    <ClInclude Include="desktop_context.h" />
+    <ClInclude Include="foreground_context.h" />
+    <ClInclude Include="frame_clock_win32.h" />
+    <ClInclude Include="frame_stall_policy.h" />
+    <ClInclude Include="frame_timing.h" />
+    <ClInclude Include="frame_transaction.h" />
+    <ClInclude Include="gpu_cursor_pixels.h" />
+    <ClInclude Include="gpu_frame_policy.h" />
+    <ClInclude Include="gpu_monitor_magnifier.h" />
+    <ClInclude Include="gpu_queue_policy.h" />
+    <ClInclude Include="gpu_shaders.h" />
+    <ClInclude Include="input_host.h" />
+    <ClInclude Include="input_health.h" />
+    <ClInclude Include="input_routing.h" />
+    <ClInclude Include="indicator_visibility.h" />
+    <ClInclude Include="input_state.h" />
+    <ClInclude Include="input_transport.h" />
+    <ClInclude Include="magnification_api.h" />
+    <ClInclude Include="monitor_geometry.h" />
+    <ClInclude Include="monitor_magnifier.h" />
+    <ClInclude Include="monitor_presenter.h" />
+    <ClInclude Include="monitor_visual.h" />
+    <ClInclude Include="scope_indicator.h" />
+    <ClInclude Include="overlay_order.h" />
+    <ClInclude Include="paint_pump_win32.h" />
+    <ClInclude Include="pointer_adapter.h" />
+    <ClInclude Include="pointer_channel.h" />
+    <ClInclude Include="pointer_feedback.h" />
+    <ClInclude Include="pointer_motion.h" />
+    <ClInclude Include="powertoys_runtime.h" />
+    <ClInclude Include="powertoys_settings.h" />
+    <ClInclude Include="runtime_state.h" />
+    <ClInclude Include="settings_store.h" />
+    <ClInclude Include="settings.h" />
+    <ClInclude Include="touchpad_hid.h" />
+    <ClInclude Include="touchpad_packets.h" />
+    <ClInclude Include="touchpad_state.h" />
+    <ClInclude Include="tray_state.h" />
+    <ClInclude Include="ui_text_cache.h" />
+    <ClInclude Include="view_mode.h" />
+    <ClInclude Include="viewport_motion.h" />
+    <ClInclude Include="watchdog.h" />
+    <ClInclude Include="window_class_lease.h" />
+    <ClInclude Include="wheel_acceleration.h" />
+    <ClInclude Include="wheel_activation.h" />
+    <ClInclude Include="zoom_animation.h" />
+    <ClInclude Include="zoom_capture_win32.h" />
+    <ClInclude Include="zoom_capture.h" />
+    <ClInclude Include="zoom_core.h" />
+    <ClInclude Include="zoom_session.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="app.rc" />
+    <Manifest Include="app.manifest" />
+    <Image Include="glidezoom.ico" />
+    <None Include="LICENSE" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RepoRoot)src\common\logger\logger.vcxproj">
+      <Project>{D9B8FC84-322A-4F9F-BBB9-20915C47DDFD}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(RepoRoot)src\common\SettingsAPI\SettingsAPI.vcxproj">
+      <Project>{6955446D-23F7-4023-9BB3-8657F904AF99}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(RepoRoot)src\common\version\version.vcxproj">
+      <Project>{CC6E41AC-8174-4E8A-8D22-85DD7F4851DF}</Project>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="$(RepoRoot)deps\spdlog.props" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(RepoRoot)packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.targets" Condition="Exists('$(RepoRoot)packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.targets')" />
+  </ImportGroup>
+</Project>

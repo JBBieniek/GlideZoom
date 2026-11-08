@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{4087A359-66F3-45CB-A742-C6ADACC54C1B}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>GlideZoomTests</RootNamespace>
+    <ProjectSubType>NativeUnitTestProject</ProjectSubType>
+    <ProjectName>GlideZoom.UnitTests</ProjectName>
+    <SkipCppCodeAnalysis>true</SkipCppCodeAnalysis>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <VcpkgEnabled>false</VcpkgEnabled>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UsePrecompiledHeaders>false</UsePrecompiledHeaders>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(RepoRoot)$(Platform)\$(Configuration)\tests\GlideZoom\</OutDir>
+    <IntDir>$(Platform)\$(Configuration)\$(MSBuildProjectName)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(VCInstallDir)UnitTest\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NOMINMAX;WIN32_LEAN_AND_MEAN;_WIN32_WINNT=0x0A00;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <UseFullPaths>true</UseFullPaths>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(VCInstallDir)UnitTest\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>user32.lib;gdi32.lib;advapi32.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="capture_tests.cpp" />
+    <ClCompile Include="control_channel_tests.cpp" />
+    <ClCompile Include="core_tests.cpp" />
+    <ClCompile Include="cursor_visibility_tests.cpp" />
+    <ClCompile Include="fusion_tests.cpp" />
+    <ClCompile Include="gpu_cursor_pixels_tests.cpp" />
+    <ClCompile Include="gpu_frame_policy_tests.cpp" />
+    <ClCompile Include="gpu_queue_policy_tests.cpp" />
+    <ClCompile Include="input_context_tests.cpp" />
+    <ClCompile Include="input_state_tests.cpp" />
+    <ClCompile Include="input_transport_tests.cpp" />
+    <ClCompile Include="latency_tests.cpp" />
+    <ClCompile Include="monitor_geometry_tests.cpp" />
+    <ClCompile Include="monitor_presenter_tests.cpp" />
+    <ClCompile Include="overlay_order_tests.cpp" />
+    <ClCompile Include="passive_monitor_tests.cpp" />
+    <ClCompile Include="pointer_channel_tests.cpp" />
+    <ClCompile Include="pointer_feedback_tests.cpp" />
+    <ClCompile Include="pointer_motion_tests.cpp" />
+    <ClCompile Include="settings_tests.cpp" />
+    <ClCompile Include="shortcut_tests.cpp" />
+    <ClCompile Include="touchpad_packets_tests.cpp" />
+    <ClCompile Include="touchpad_tests.cpp" />
+    <ClCompile Include="tray_tests.cpp" />
+    <ClCompile Include="view_mode_tests.cpp" />
+    <ClCompile Include="viewport_motion_tests.cpp" />
+    <ClCompile Include="zoom_precision_tests.cpp" />
+    <ClCompile Include="zoom_session_tests.cpp" />
+    <ClCompile Include="GlideZoom.UnitTests.cpp" />
+    <ClCompile Include="InputHealthTests.cpp" />
+    <ClCompile Include="RoutingTests.cpp" />
+    <ClCompile Include="WheelAccelerationTests.cpp" />
+    <ClCompile Include="WheelActivationTests.cpp" />
+    <ClCompile Include="PointerSpeedTests.cpp" />
+    <ClCompile Include="ScopeIndicatorTests.cpp" />
+    <ClCompile Include="IndicatorVisibilityTests.cpp" />
+    <ClCompile Include="GpuShaderTests.cpp" />
+    <ClInclude Include="PortableTestAdapter.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
