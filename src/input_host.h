@@ -13,6 +13,7 @@
 #include "pointer_channel.h"
 #include "pointer_dispatch.h"
 #include "wheel_activation.h"
+#include "shortcut_commands.h"
 
 #include <windows.h>
 #include <atomic>
@@ -83,6 +84,7 @@ namespace glide::input
             ready_.store(false);
             stopping_.store(false);
             queue_.Reset();
+            pointerFailureDetails_.Reset();
             uiBeat_.store(GetTickCount64());
             startedEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
             stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -138,12 +140,35 @@ namespace glide::input
             routingWake_.store(window);
             routingMessage_.store(message);
         }
+        void SetShortcutWake(HWND window, UINT message) noexcept
+        {
+            shortcutWake_.store(window);
+            shortcutMessage_.store(message);
+        }
         bool UpdateRouting(const routing::Snapshot& snapshot) noexcept { return routingPublication_.Publish(snapshot); }
         bool UpdateActivationWheel(const wheel::Activation& admission) noexcept { return activationPublication_.Publish(admission); }
         bool ReadRoutingFeedback(routing::Feedback& feedback) const noexcept { return routingFeedback_.Read(feedback); }
         void UpdatePointer(const PointerSnapshot& snapshot) noexcept { pointerPublication_.Publish(snapshot); }
         bool PointerFaulted() const noexcept { return pointerFault_.load(std::memory_order_acquire); }
         pointer::Failure PointerFailureReason() const noexcept { return pointerFailure_.load(std::memory_order_acquire); }
+        // UI-thread consumer. Diagnostic overflow drops records only; it must
+        // never interfere with the release ledger or the input-fault policy.
+        bool ReadPointerFailureDetails(pointer::FailureDetails& output) noexcept { return pointerFailureDetails_.Pop(output); }
+        // Bounded UI-thread read for explicit diagnostic/probe boundaries. No
+        // per-packet logging and no reader spins on the hook's publication.
+        bool ReadPointerPendingStatistics(pointer::PendingStatistics& ordinary, pointer::PendingStatistics& forwarded) const noexcept
+        {
+            const auto before = pendingStatisticsSequence_.load();
+            if (before & 1u)
+                return false;
+            const pointer::PendingStatistics nextOrdinary{ pendingStatistics_[0].load(), pendingStatistics_[1].load(), pendingStatistics_[2].load(), pendingStatistics_[3].load() };
+            const pointer::PendingStatistics nextForwarded{ pendingStatistics_[4].load(), pendingStatistics_[5].load(), pendingStatistics_[6].load(), pendingStatistics_[7].load() };
+            if (pendingStatisticsSequence_.load() != before)
+                return false;
+            ordinary = nextOrdinary;
+            forwarded = nextForwarded;
+            return true;
+        }
         bool ReadPointerFeedback(pointer::Feedback& output) const noexcept
         {
             if (!Healthy() || stopping_.load(std::memory_order_acquire))
@@ -188,11 +213,23 @@ namespace glide::input
         {
             if (pointer_.InWarp() || dragPointer_.InWarp())
                 return;
+            PublishPointerPendingStatistics();
             pointerFault_.store(pointer_.Faulted(), std::memory_order_release);
             const auto failure = pointer_.FailureReason();
             pointerFailure_.store(failure, std::memory_order_release);
+            const auto publishFailure = [this](const pointer::Adapter& adapter, bool forwarded) noexcept {
+                const pointer::FailureDetails& source = adapter.LastFailureDetails();
+                if (source.valid && source.reason == adapter.FailureReason() &&
+                    (source.reason == pointer::Failure::Warp || source.reason == pointer::Failure::Readback))
+                {
+                    pointer::FailureDetails details = source;
+                    details.forwarded = forwarded;
+                    pointerFailureDetails_.Push(details);
+                }
+            };
             if (failure != lastPointerFailure_)
             {
+                publishFailure(pointer_, false);
                 if (failure != pointer::Failure::None)
                 {
                     OutputDebugStringW(L"GlideZoom: ");
@@ -201,9 +238,38 @@ namespace glide::input
                 }
                 lastPointerFailure_ = failure;
             }
+            const auto dragFailure = dragPointer_.FailureReason();
+            if (dragFailure != lastDragPointerFailure_)
+            {
+                publishFailure(dragPointer_, true);
+                lastDragPointerFailure_ = dragFailure;
+            }
             const bool eligible = pointerControlsCoherent_ && InputGate(GetTickCount64()) &&
                                   state_.Active() == Gesture::None && !touchpadState_.Active();
             pointerFeedback_.Publish(eligible ? (routing_.HasForwardedDrag() ? dragPointer_.FeedbackSnapshot() : pointer_.FeedbackSnapshot()) : pointer::Feedback{});
+        }
+        void PublishPointerPendingStatistics() noexcept
+        {
+            const pointer::PendingStatistics ordinary = pointer_.PendingCounts();
+            const pointer::PendingStatistics forwarded = dragPointer_.PendingCounts();
+            const auto same = [](const pointer::PendingStatistics& a, const pointer::PendingStatistics& b) noexcept {
+                return a.started == b.started && a.acknowledged == b.acknowledged && a.interrupted == b.interrupted && a.expired == b.expired;
+            };
+            if (same(ordinary, lastOrdinaryPendingStatistics_) && same(forwarded, lastForwardedPendingStatistics_))
+                return;
+            const auto sequence = pendingStatisticsSequence_.load();
+            if ((sequence & 1u) || sequence >= (std::numeric_limits<std::uint64_t>::max)() - 1)
+            {
+                pendingStatisticsSequence_.store((std::numeric_limits<std::uint64_t>::max)());
+                return;
+            }
+            pendingStatisticsSequence_.store(sequence + 1);
+            const std::array<std::uint64_t, 8> values{ ordinary.started, ordinary.acknowledged, ordinary.interrupted, ordinary.expired, forwarded.started, forwarded.acknowledged, forwarded.interrupted, forwarded.expired };
+            for (std::size_t index = 0; index < values.size(); ++index)
+                pendingStatistics_[index].store(values[index]);
+            pendingStatisticsSequence_.store(sequence + 2);
+            lastOrdinaryPendingStatistics_ = ordinary;
+            lastForwardedPendingStatistics_ = forwarded;
         }
         void PublishRoutingFeedback() noexcept
         {
@@ -230,6 +296,7 @@ namespace glide::input
             Hook
         };
         static constexpr wchar_t ClassName[] = L"GlideZoom.InputHost";
+        static constexpr int kShortcutProbe = 0x475A;
         inline static thread_local Host* current_ = nullptr;
 
         static DWORD WINAPI ThreadEntry(void* value) noexcept
@@ -255,6 +322,7 @@ namespace glide::input
             {
                 const auto& input = *reinterpret_cast<const KBDLLHOOKSTRUCT*>(data);
                 const State before = current_->state_;
+                const auto commandsBefore = current_->shortcutCommands_;
                 try
                 {
                     if (current_->Keyboard(message, input))
@@ -263,14 +331,19 @@ namespace glide::input
                 catch (...)
                 {
                     current_->state_ = before;
+                    current_->shortcutCommands_ = commandsBefore;
                     current_->LatchFault();
                     const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
                     const bool up = message == WM_KEYUP || message == WM_SYSKEYUP;
                     // Reprocess in disabled state: a new DOWN passes, while an
                     // already reserved UP is consumed once and clears its ledger.
-                    if (!(input.flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED)) && (down || up) &&
-                        current_->state_.Key(input.vkCode, down, GetTickCount64()).consume)
-                        return 1;
+                    if (!(input.flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED)) && (down || up))
+                    {
+                        const auto decision = current_->state_.Key(input.vkCode, down, GetTickCount64());
+                        const auto command = current_->shortcutCommands_.Key(input.vkCode, down, shortcuts::ReadModifiers(current_->state_), false, [](shortcuts::Binding, bool) noexcept { return false; });
+                        if (decision.consume || command.consume)
+                            return 1;
+                    }
                 }
             }
             return CallNextHookEx(nullptr, code, message, data);
@@ -328,6 +401,7 @@ namespace glide::input
         void Run()
         {
             state_ = State{};
+            shortcutCommands_.SessionReset();
             routing_ = routing::State{};
             activation_ = {};
             activationClosed_ = activationCancelled_ = activationClosePending_ = false;
@@ -406,6 +480,9 @@ namespace glide::input
 
         void Cleanup() noexcept
         {
+            if (shortcutProbeOwned_)
+                UnregisterHotKey(nullptr, kShortcutProbe);
+            shortcutProbeOwned_ = false;
             pointer_.Pause();
             PublishPointerFeedback();
             state_.SetEnabled(false);
@@ -443,6 +520,8 @@ namespace glide::input
         void Service(std::uint64_t now)
         {
             FeedbackScope feedback(*this);
+            if (shortcutProbeOwned_ && UnregisterHotKey(nullptr, kShortcutProbe))
+                shortcutProbeOwned_ = false;
             hostBeat_.store(now, std::memory_order_release);
             const auto context = glide::QueryInputDesktop();
             const bool desktop = context == glide::InputDesktop::Current;
@@ -455,6 +534,7 @@ namespace glide::input
                 if (context == glide::InputDesktop::Other && !confirmedAway_)
                 {
                     Apply(state_.SessionReset(), now);
+                    shortcutCommands_.SessionReset();
                     routing_.SessionReset();
                     confirmedAway_ = true;
                     seeded_ = false;
@@ -464,7 +544,10 @@ namespace glide::input
             {
                 Apply(state_.SetEnabled(false), now);
                 if (confirmedAway_)
+                {
                     Apply(state_.SessionReset(), now);
+                    shortcutCommands_.SessionReset();
+                }
                 SeedHeldKeys();
                 POINT seedPoint{};
                 if (GetPhysicalCursorPos(&seedPoint))
@@ -489,6 +572,7 @@ namespace glide::input
             // Service held =/- zoom after current controls, desktop and physical
             // modifiers have been reconciled. State emits at most one due repeat;
             // OS key-repeat messages do not control or multiply this cadence.
+            shortcutCommands_.ObserveModifiers(shortcuts::ReadModifiers(state_));
             Apply(state_.Expire(now), now);
             ApplyTouchpad(touchpadState_.Expire(now));
             if (touchpadAssembler_.Expire(now))
@@ -500,6 +584,12 @@ namespace glide::input
                 pendingHook_ = pendingTravel_ = 0;
             }
             FlushDelta();
+            if (pointer_.Pending() || dragPointer_.Pending())
+            {
+                PointerSnapshot snapshot;
+                const bool coherent = pointerControlsCoherent_ && pointerPublication_.Read(snapshot);
+                ServicePointerPending(now, snapshot, controls_.Epoch(), coherent, (controls_.Options() & 1) != 0, InputGate(now), state_.Active() != Gesture::None || touchpadState_.Active(), routing_, pointer_, dragPointer_, pointerNative_);
+            }
             if (pointer_.Faulted())
             {
                 PointerSnapshot snapshot;
@@ -540,9 +630,20 @@ namespace glide::input
                 LatchFault();
             if (oldEpoch != controls_.Epoch() || oldOptions != controls_.Options())
             {
+                shortcutCommands_.Cancel();
                 pointer_.Pause();
+                if (dragPointer_.Pending())
+                    dragPointer_.Pause();
                 ApplyTouchpad(touchpadState_.Cancel(), oldEpoch);
                 touchpadAssembler_.Reset();
+            }
+            if (!coherent || !routeReady || (controls_.Options() & 1) == 0 || !InputGate(now))
+            {
+                shortcutCommands_.Cancel();
+                if (pointer_.Pending())
+                    pointer_.Pause();
+                if (dragPointer_.Pending())
+                    dragPointer_.Pause();
             }
             const auto options = controls_.Options();
             ApplyTouchpad(touchpadState_.Configure({ (options >> 16) & 0xFFFFu, (options >> 32) & 0xFFFFu }));
@@ -590,7 +691,10 @@ namespace glide::input
                 if (key == vk::Shift || key == vk::Control || key == vk::Alt)
                     continue;
                 if ((GetAsyncKeyState(static_cast<int>(key)) & 0x8000) != 0)
+                {
                     state_.Key(key, true, 0);
+                    shortcutCommands_.Seed(key, true);
+                }
             }
             const int buttons[] = { VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2 };
             for (unsigned i = 0; i < 5; ++i)
@@ -614,13 +718,40 @@ namespace glide::input
             const auto now = GetTickCount64();
             Synchronize(now);
             CancelTouchpad(); // A deliberate keyboard action ends the touchpad command.
+            Apply(shortcuts::CancelForAltGr(state_, data.vkCode, down), now);
             const Decision decision = state_.Key(data.vkCode, down, now);
             Apply(decision, now);
+            const auto command = shortcutCommands_.Key(data.vkCode, down, shortcuts::ReadModifiers(state_), controlsCoherent_ && routing_.ZoomReady() && (controls_.Options() & 1) != 0 && InputGate(now) && state_.Active() == Gesture::None, [this](shortcuts::Binding binding, bool fresh) noexcept { return PostShortcut(binding, fresh); });
             if (!WheelChord() || (down && data.vkCode != vk::LeftControl && data.vkCode != vk::RightControl &&
                                   data.vkCode != vk::LeftAlt && data.vkCode != vk::RightAlt &&
                                   data.vkCode != vk::LeftWin && data.vkCode != vk::RightWin))
                 CloseActivation(now, false);
-            return decision.consume;
+            return decision.consume || command.consume;
+        }
+
+        bool PostShortcut(shortcuts::Binding binding, bool fresh) noexcept
+        {
+            if (fresh)
+            {
+                // Probe on this hook thread before intercepting the fresh key.
+                // Never retain a generic Ctrl+Alt registration: it also reserves
+                // AltGr character entry. An existing owner gets the whole pair.
+                const UINT modifiers = MOD_CONTROL | MOD_ALT | (binding.shift ? MOD_SHIFT : 0);
+                if (!RegisterHotKey(nullptr, kShortcutProbe, modifiers, binding.key))
+                    return false;
+                shortcutProbeOwned_ = true;
+                if (!UnregisterHotKey(nullptr, kShortcutProbe))
+                {
+                    LatchFault();
+                    return false;
+                }
+                shortcutProbeOwned_ = false;
+            }
+            const HWND target = shortcutWake_.load();
+            if (target && PostMessageW(target, shortcutMessage_.load(), static_cast<WPARAM>(binding.command), static_cast<LPARAM>(controls_.Epoch())))
+                return true;
+            LatchFault();
+            return false;
         }
 
         bool Mouse(WPARAM message, const MSLLHOOKSTRUCT& data)
@@ -652,7 +783,10 @@ namespace glide::input
             if (data.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED))
             {
                 if (message == WM_MOUSEMOVE)
+                {
                     pointer_.Pause();
+                    dragPointer_.Pause();
+                }
                 return false;
             }
             Synchronize(now, &point);
@@ -1080,6 +1214,7 @@ namespace glide::input
         }
         void LatchFault() noexcept
         {
+            shortcutCommands_.Cancel();
             pointer_.Pause();
             fault_.store(true, std::memory_order_release);
             PublishPointerFeedback();
@@ -1116,7 +1251,7 @@ namespace glide::input
             return state_.SwallowedKey(vk::Space) || state_.SwallowedKey(vk::Escape) ||
                    state_.SwallowedKey(vk::Equal) || state_.SwallowedKey(vk::Minus) ||
                    state_.SwallowedKey(vk::Add) || state_.SwallowedKey(vk::Subtract) ||
-                   state_.SwallowedButton(Button::Left) || routing_.HasBlockedButtons();
+                   state_.SwallowedButton(Button::Left) || routing_.HasBlockedButtons() || shortcutCommands_.ReservedReleasePending();
         }
         void CloseHandles()
         {
@@ -1146,7 +1281,12 @@ namespace glide::input
         wheel::ActivationChannel activationPublication_{};
         std::atomic<HWND> routingWake_{ nullptr };
         std::atomic<UINT> routingMessage_{ 0 };
+        std::atomic<HWND> shortcutWake_{ nullptr };
+        std::atomic<UINT> shortcutMessage_{ 0 };
         SpscQueue<Event, 256> queue_{};
+        SpscQueue<pointer::FailureDetails, 16> pointerFailureDetails_{};
+        std::atomic<std::uint64_t> pendingStatisticsSequence_{ 0 };
+        std::array<std::atomic<std::uint64_t>, 8> pendingStatistics_{};
 
         // Everything below is owned exclusively by the hook thread.
         State state_{};
@@ -1161,9 +1301,13 @@ namespace glide::input
         pointer::Adapter dragPointer_{};
         pointer::NativeOps pointerNative_{};
         pointer::Failure lastPointerFailure_ = pointer::Failure::None;
+        pointer::Failure lastDragPointerFailure_ = pointer::Failure::None;
+        pointer::PendingStatistics lastOrdinaryPendingStatistics_{}, lastForwardedPendingStatistics_{};
         bool pointerControlsCoherent_ = false, controlsCoherent_ = false;
         double zoom_ = 1;
         ControlReader controls_{};
+        shortcuts::State shortcutCommands_{};
+        bool shortcutProbeOwned_ = false;
         bool desktop_ = false, seeded_ = false, confirmedAway_ = false;
         bool rawRegistered_ = false, classRegistered_ = false;
         bool touchpadRegistered_ = false, touchpadStartsAllowed_ = false;

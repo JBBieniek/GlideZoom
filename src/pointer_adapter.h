@@ -37,6 +37,33 @@ namespace glide::pointer
         Failed
     };
 
+    // One failed native transaction, not a pointer trace. The hook publishes
+    // these bounded POD records only when a native failure first latches.
+    struct FailureDetails
+    {
+        bool valid = false;
+        Failure reason = Failure::None;
+        std::uint64_t at = 0, epoch = 0;
+        Vec2 before{}, candidate{}, requested{}, observed{};
+        Rect bounds{};
+        Vec2 offset{};
+        double zoom = 1, speedMultiplier = 1;
+        bool adjustForZoom = true, forwarded = false, constrained = false;
+        bool warpSucceeded = false, readSucceeded = false;
+        std::uint32_t nativeError = 0;
+        // These extra queries occur after failed verification. They are useful
+        // context, not an atomic cursor/mapping observation or proof of cause.
+        bool logicalRead = false, clipRead = false;
+        Vec2 logical{};
+        Rect clip{};
+        std::uint32_t logicalError = 0, clipError = 0;
+    };
+
+    struct PendingStatistics
+    {
+        std::uint64_t started = 0, acknowledged = 0, interrupted = 0, expired = 0;
+    };
+
     inline constexpr const wchar_t* FailureText(Failure reason) noexcept
     {
         switch (reason)
@@ -71,11 +98,16 @@ namespace glide::pointer
     public:
         bool Faulted() const noexcept { return failure_ != Failure::None; }
         Failure FailureReason() const noexcept { return failure_; }
+        const FailureDetails& LastFailureDetails() const noexcept { return failureDetails_; }
+        bool Pending() const noexcept { return pending_.valid; }
+        bool PendingConstrained() const noexcept { return pending_.valid && pending_.constrained; }
+        PendingStatistics PendingCounts() const noexcept { return pendingStatistics_; }
+        static constexpr std::uint64_t PendingLeaseMs = 32;
         bool InWarp() const noexcept { return inWarp_; }
         Vec2 Remainder() const noexcept { return remainder_; }
         Feedback FeedbackSnapshot() const noexcept
         {
-            if (!feedbackValid_ || !seeded_ || Faulted() || inWarp_ ||
+            if (!feedbackValid_ || !seeded_ || Faulted() || inWarp_ || Pending() ||
                 !view_.requested || !view_.active || view_.zoom <= 1)
                 return {};
             return { true, expected_, remainder_, view_.bounds, view_.zoom, view_.epoch, view_.speedMultiplier, view_.adjustForZoom };
@@ -103,6 +135,16 @@ namespace glide::pointer
         // always be distinguished, and neither should permanently disable gain.
         bool BypassEcho(Vec2 candidate, std::uint64_t now) noexcept
         {
+            // Even a synchronously observed setter callback can precede the
+            // physical position update. Keep the pending target recognizable
+            // after its ordinary echo ledger entry has already been consumed.
+            if (Pending() && Same(candidate, pending_.step.point))
+            {
+                if (now < pending_.at)
+                    return Fail(Failure::Clock);
+                if (now - pending_.at <= PendingLeaseMs)
+                    return true;
+            }
             for (auto& echo : echoes_)
             {
                 if (!echo.valid)
@@ -120,6 +162,11 @@ namespace glide::pointer
                 if (Same(candidate, echo.point))
                 {
                     echo.valid = false;
+                    // The setter may deliver its target before a physical getter
+                    // can observe the change. Passing this untagged echo is not
+                    // an acknowledgement and must not discard the pending step.
+                    if (Pending() && Same(candidate, pending_.step.point))
+                        return true;
                     if (seeded_ && !Same(candidate, expected_))
                         Pause();
                     return true;
@@ -132,6 +179,7 @@ namespace glide::pointer
         // use Pause alone and can resume from the next verified physical sample.
         void Pause() noexcept
         {
+            pending_.valid = false;
             InvalidateFeedback();
             if (pauseVersion_ != std::numeric_limits<std::uint64_t>::max())
                 ++pauseVersion_;
@@ -154,6 +202,79 @@ namespace glide::pointer
                 failure_ = Failure::None;
                 Pause();
             }
+        }
+
+        // A successful physical setter can still read back the exact old point
+        // while its low-level hook is on the stack. Only a later exact physical
+        // observation under the same policy acknowledges that one request. No
+        // native write, waiting, or movement replay occurs in this verifier.
+        template<class Native>
+        bool ServicePending(std::uint64_t now, const View& view, bool permitted, bool gestureActive, Native& native, const Vec2* interveningCandidate = nullptr) noexcept
+        {
+            if (!Pending() || inWarp_)
+                return false;
+            if (!permitted || gestureActive || !view.requested || !view.active || view.zoom <= 1 ||
+                !Valid(view) || !SamePolicy(view, pending_.view) || pending_.version != pauseVersion_)
+            {
+                Pause();
+                return false;
+            }
+            if (now < pending_.at)
+                return Fail(Failure::Clock);
+            const auto version = pauseVersion_;
+            if (!native.Ready(view) ||
+                (pending_.hasLimit && !Same(pending_.limit, NativeLimit(native, 0))))
+            {
+                Pause();
+                return false;
+            }
+            if (!Pending() || version != pauseVersion_ || Faulted())
+                return false;
+            Vec2 observed{};
+            const bool read = native.Read(observed);
+            const auto error = read ? std::uint32_t{} : static_cast<std::uint32_t>(NativeError(native, 0));
+            if (!Pending() || version != pauseVersion_ || Faulted())
+                return false;
+            // Expiration wins even if the target finally appears: a late point
+            // is not authority to revive an old fraction or completed gesture.
+            const bool expired = now - pending_.at > PendingLeaseMs;
+            if (read && !expired && Same(observed, pending_.step.point))
+            {
+                if (!native.CanPlace(observed) || !native.Ready(view) ||
+                    !Pending() || version != pauseVersion_ || Faulted())
+                {
+                    Pause();
+                    return false;
+                }
+                const Step step = pending_.step;
+                const auto generation = pending_.feedbackGeneration;
+                pending_.valid = false;
+                Increment(pendingStatistics_.acknowledged);
+                Commit(step, now, generation);
+                return true;
+            }
+            // A later real hook packet can already be the committed physical
+            // position. It supersedes the old request; it does not verify that
+            // request or justify replaying its fraction. Timer service has no
+            // such event evidence and retains the strict mismatch policy.
+            if (read && interveningCandidate && ValidPoint(*interveningCandidate) &&
+                Same(observed, *interveningCandidate) && !Same(observed, pending_.step.point))
+            {
+                Increment(pendingStatistics_.interrupted);
+                Pause();
+                return false;
+            }
+            if (!expired && read && Same(observed, pending_.before))
+                return false;
+            if (expired)
+                Increment(pendingStatistics_.expired);
+            // Keep the normal failure record and strict mismatch policy. The
+            // initiating coordinates remain separate from this later observation.
+            inWarp_ = true;
+            RecordNativeFailure(Failure::Readback, pending_.step, pending_.before, pending_.candidate, pending_.constrained, now, true, read, observed, error, native);
+            inWarp_ = false;
+            failedAt_ = now;
+            return Fail(Failure::Readback);
         }
 
         // Read-only probation for an uncertain native write. This never warps,
@@ -243,6 +364,21 @@ namespace glide::pointer
             {
                 Pause();
                 return false;
+            }
+            if (Pending())
+            {
+                if (!ServicePending(now, view, permitted, gestureActive, native, &candidate))
+                {
+                    // This is a distinct real packet before the old request
+                    // could be verified. Let Windows process it, discard the
+                    // proposal, and never pull it back or replay its delta.
+                    if (Pending())
+                    {
+                        Increment(pendingStatistics_.interrupted);
+                        Pause();
+                    }
+                    return false;
+                }
             }
             if (!view.requested || !view.active || view.zoom == 1 || gestureActive)
             {
@@ -356,7 +492,7 @@ namespace glide::pointer
                 return false;
             }
 
-            return WriteStep(step, now, version, feedbackGeneration, slot, native);
+            return WriteStep(step, current, candidate, false, now, version, feedbackGeneration, slot, native);
         }
 
         // A forwarded drag cannot enter a passive zoom using another monitor's
@@ -365,6 +501,12 @@ namespace glide::pointer
         template<class Native>
         ConstraintResult Constrain(Vec2 candidate, std::uint64_t now, const View& view, Rect limit, Native& native) noexcept
         {
+            if (Pending())
+            {
+                Increment(pendingStatistics_.interrupted);
+                Pause();
+                return ConstraintResult::Failed; // Never overlap a second native correction.
+            }
             if (!ValidPoint(candidate) || !ValidBounds(limit) || !Valid(view) ||
                 limit.left < view.bounds.left || limit.top < view.bounds.top ||
                 limit.right > view.bounds.right || limit.bottom > view.bounds.bottom || Faulted() || inWarp_)
@@ -396,14 +538,80 @@ namespace glide::pointer
                 }
             if (!slot)
                 return ConstraintResult::Failed;
-            return WriteStep(step, now, version, generation, slot, native) ?
+            return WriteStep(step, current, candidate, true, now, version, generation, slot, native) ?
                        ConstraintResult::Consumed :
                        ConstraintResult::Failed;
         }
 
     private:
+        static constexpr void Increment(std::uint64_t& value) noexcept
+        {
+            if (value != (std::numeric_limits<std::uint64_t>::max)())
+                ++value;
+        }
+        static constexpr bool SamePolicy(const View& a, const View& b) noexcept
+        {
+            return a.requested == b.requested && a.active == b.active && a.epoch == b.epoch &&
+                   Same(a.bounds, b.bounds) && a.zoom == b.zoom && Same(a.offset, b.offset) &&
+                   a.edgePanMultiplier == b.edgePanMultiplier && a.speedMultiplier == b.speedMultiplier &&
+                   a.adjustForZoom == b.adjustForZoom;
+        }
         template<class Native>
-        bool WriteStep(const Step& step, std::uint64_t now, std::uint64_t version, std::uint64_t feedbackGeneration, Echo* slot, Native& native) noexcept
+        static auto NativeLimit(Native& native, int) noexcept -> decltype(native.Limit())
+        {
+            return native.Limit();
+        }
+        template<class Native>
+        static constexpr Rect NativeLimit(Native&, long) noexcept
+        {
+            return {};
+        }
+        template<class Native>
+        static auto NativeError(Native& native, int) noexcept -> decltype(native.LastError())
+        {
+            return native.LastError();
+        }
+        template<class Native>
+        static constexpr std::uint32_t NativeError(Native&, long) noexcept
+        {
+            return 0;
+        }
+        template<class Native>
+        static auto NativeFailureObservation(Native& native, FailureDetails& output, int) noexcept -> decltype(native.ObserveFailure(output), void())
+        {
+            native.ObserveFailure(output);
+        }
+        template<class Native>
+        static constexpr void NativeFailureObservation(Native&, FailureDetails&, long) noexcept
+        {
+        }
+
+        template<class Native>
+        void RecordNativeFailure(Failure reason, const Step& step, Vec2 before, Vec2 candidate, bool constrained, std::uint64_t now, bool warped, bool read, Vec2 observed, std::uint32_t error, Native& native) noexcept
+        {
+            failureDetails_ = {};
+            failureDetails_.valid = true;
+            failureDetails_.reason = reason;
+            failureDetails_.at = now;
+            failureDetails_.epoch = view_.epoch;
+            failureDetails_.before = before;
+            failureDetails_.candidate = candidate;
+            failureDetails_.requested = step.point;
+            failureDetails_.observed = observed;
+            failureDetails_.bounds = view_.bounds;
+            failureDetails_.offset = view_.offset;
+            failureDetails_.zoom = view_.zoom;
+            failureDetails_.speedMultiplier = view_.speedMultiplier;
+            failureDetails_.adjustForZoom = view_.adjustForZoom;
+            failureDetails_.constrained = constrained;
+            failureDetails_.warpSucceeded = warped;
+            failureDetails_.readSucceeded = read;
+            failureDetails_.nativeError = error;
+            NativeFailureObservation(native, failureDetails_, 0);
+        }
+
+        template<class Native>
+        bool WriteStep(const Step& step, Vec2 before, Vec2 candidate, bool constrained, std::uint64_t now, std::uint64_t version, std::uint64_t feedbackGeneration, Echo* slot, Native& native) noexcept
         {
             // No loops, waiting, SendInput, raw-device conversion or global mouse
             // settings. Readback is mandatory. If another owner wins a write/readback
@@ -413,22 +621,45 @@ namespace glide::pointer
             *slot = { step.point, now, true };
             inWarp_ = true;
             const bool warped = native.Warp(step.point);
+            const auto warpError = warped ? std::uint32_t{} : static_cast<std::uint32_t>(NativeError(native, 0));
             Vec2 observed{};
             const bool read = warped && native.Read(observed);
-            inWarp_ = false;
+            const auto readError = read ? std::uint32_t{} : static_cast<std::uint32_t>(NativeError(native, 0));
             if (!warped)
             {
+                RecordNativeFailure(Failure::Warp, step, before, candidate, constrained, now, false, false, observed, warpError, native);
+                inWarp_ = false;
                 slot->valid = false;
                 failedAt_ = now;
                 return Fail(Failure::Warp);
             }
             if (synchronousEcho_)
                 slot->valid = false;
+            if (!constrained && read && Same(observed, before) && !Same(observed, step.point) &&
+                version == pauseVersion_ && !Faulted())
+            {
+                // A measured pre-commit getter is neither a successful commit
+                // nor arbitrary interference. Own just this original packet;
+                // later service must confirm the exact requested physical point.
+                pending_ = { true, constrained, step, view_, before, candidate, NativeLimit(native, 0), now, version, feedbackGeneration };
+                pending_.hasLimit = ValidBounds(pending_.limit);
+                // An observed callback did not yet commit the physical point.
+                // Retain the bounded bypass even if cancellation later removes
+                // the pending proposal before another target callback arrives.
+                slot->valid = true;
+                Increment(pendingStatistics_.started);
+                feedbackValid_ = false;
+                inWarp_ = false;
+                return true;
+            }
             if (!read || !Same(observed, step.point))
             {
+                RecordNativeFailure(Failure::Readback, step, before, candidate, constrained, now, true, read, observed, readError, native);
+                inWarp_ = false;
                 failedAt_ = now;
                 return Fail(Failure::Readback);
             }
+            inWarp_ = false;
             // A nested desktop/configuration/gesture cancellation may have run
             // during a native call. Do not resurrect its discarded fractional
             // state or consume the original move after that cancellation.
@@ -444,6 +675,16 @@ namespace glide::pointer
             std::uint64_t at = 0;
             bool valid = false;
         };
+        struct PendingWrite
+        {
+            bool valid = false, constrained = false;
+            Step step{};
+            View view{};
+            Vec2 before{}, candidate{};
+            Rect limit{};
+            std::uint64_t at = 0, version = 0, feedbackGeneration = 0;
+            bool hasLimit = false;
+        };
         // 1024 records accommodate an 8000 Hz mouse within the short echo lease.
         // Excess pressure only passes one event and discards its motion history;
         // it never allocates, spins, or disables gain for the whole process.
@@ -454,6 +695,9 @@ namespace glide::pointer
         Vec2 expected_{}, remainder_{}, warpPoint_{};
         std::uint64_t lastAt_ = 0, pauseVersion_ = 0, feedbackGeneration_ = 0;
         Failure failure_ = Failure::None;
+        FailureDetails failureDetails_{};
+        PendingWrite pending_{};
+        PendingStatistics pendingStatistics_{};
         bool seeded_ = false, inWarp_ = false, synchronousEcho_ = false;
         bool feedbackValid_ = false;
         View recoveryView_{};
@@ -488,6 +732,20 @@ namespace glide::pointer
     class NativeOps
     {
     public:
+        std::uint32_t LastError() const noexcept { return GetLastError(); }
+        void ObserveFailure(FailureDetails& output) const noexcept
+        {
+            POINT logical{};
+            output.logicalRead = GetCursorPos(&logical) != FALSE;
+            output.logicalError = output.logicalRead ? ERROR_SUCCESS : GetLastError();
+            if (output.logicalRead)
+                output.logical = { static_cast<double>(logical.x), static_cast<double>(logical.y) };
+            RECT clip{};
+            output.clipRead = GetClipCursor(&clip) != FALSE;
+            output.clipError = output.clipRead ? ERROR_SUCCESS : GetLastError();
+            if (output.clipRead)
+                output.clip = { static_cast<double>(clip.left), static_cast<double>(clip.top), static_cast<double>(clip.right), static_cast<double>(clip.bottom) };
+        }
         bool Ready(const View& view) const noexcept
         {
             Rect limit;
@@ -583,6 +841,16 @@ namespace glide::pointer
         bool Read(Vec2& point) noexcept { return native_.Read(point); }
         bool CanPlace(Vec2 point) noexcept { return Contains(limit_, point) && native_.CanPlace(point); }
         bool Warp(Vec2 point) noexcept { return native_.Warp(point); }
+        template<class Probe = Native>
+        auto LastError() const noexcept -> decltype(static_cast<Probe*>(nullptr)->LastError())
+        {
+            return native_.LastError();
+        }
+        template<class Probe = Native>
+        auto ObserveFailure(FailureDetails& output) const noexcept -> decltype(static_cast<Probe*>(nullptr)->ObserveFailure(output), void())
+        {
+            native_.ObserveFailure(output);
+        }
 
     private:
         Native& native_;

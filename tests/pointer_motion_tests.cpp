@@ -33,9 +33,18 @@ struct Native {
     Adapter* adapter = nullptr;
     View view = Enabled();
     std::uint64_t now = 0;
-    bool ready = true, reachable = true, writeOk = true, wrongReadback = false;
+    bool ready = true, reachable = true, writeOk = true, wrongReadback = false, deferredWrite = false;
+    Vec2 deferredPoint{};
     bool reenter = false, earlyHostBypass = false, pauseDuringWrite = false, pauseDuringReady = false;
-    unsigned failReadAt = 0, pauseReadAt = 0, reads = 0, writes = 0, checks = 0, reentries = 0;
+    unsigned failReadAt = 0, pauseReadAt = 0, reads = 0, writes = 0, checks = 0, reentries = 0, failureObservations = 0;
+    constexpr std::uint32_t LastError() const noexcept { return 1234; }
+    void ObserveFailure(FailureDetails& output) noexcept {
+        ++failureObservations;
+        Check(adapter && adapter->InWarp(), "failure-only native observation retains the setter reentrancy guard");
+        output.logicalRead = output.clipRead = true;
+        output.logical = cursor;
+        output.clip = view.bounds;
+    }
     bool Ready(const View&) noexcept {
         ++checks;
         if (pauseDuringReady) adapter->Pause();
@@ -52,7 +61,8 @@ struct Native {
     bool Warp(Vec2 value) noexcept {
         ++writes;
         if (!writeOk) return false;
-        cursor = value;
+        deferredPoint = value;
+        if (!deferredWrite) cursor = value;
         if (reenter) {
             ++reentries;
             Check(adapter && adapter->InWarp(), "native write is covered by reentrancy guard");
@@ -126,6 +136,134 @@ void GeometryAndBoundaryMatrix() {
     Near(Advance({-10, 100}, {200, 0}, monitor, 4).x, 190, "tangential motion below monitor is unchanged");
     Near(Advance({100, 50}, {-4, 0}, monitor, 4).x, 99, "entry from exact right edge slows as it enters");
     Near(Advance({0, 50}, {-4, 0}, monitor, 4).x, -4, "exit from exact left edge never sticks");
+}
+
+void NativeFailureCoordinateSnapshots() {
+    for (unsigned failure = 0; failure < 3; ++failure) {
+        Driver driver;
+        driver.view.speedMultiplier = 0.25;
+        driver.Seed();
+        const auto failureAt = driver.now;
+        if (failure == 0) driver.native.writeOk = false;
+        if (failure == 1) driver.native.wrongReadback = true;
+        if (failure == 2) driver.native.failReadAt = driver.native.reads + 2;
+        Check(!driver.Send({116, 100}), "failed native compensation still passes the original physical move");
+        const FailureDetails snapshot = driver.adapter.LastFailureDetails();
+        Check(snapshot.valid && snapshot.reason == (failure == 0 ? Failure::Warp : Failure::Readback) &&
+                  snapshot.at == failureAt && snapshot.epoch == driver.view.epoch &&
+                  Same(snapshot.before, {100, 100}) && Same(snapshot.candidate, {116, 100}) &&
+                  Same(snapshot.requested, {101, 100}),
+              "failure snapshot preserves pre-event, proposed endpoint and exact requested quarter-speed/zoom result");
+        Check(snapshot.warpSucceeded == (failure != 0) && snapshot.readSucceeded == (failure == 1) &&
+                  snapshot.nativeError == (failure == 1 ? 0u : 1234u) &&
+                  Same(snapshot.observed, failure == 1 ? Vec2{111, 100} : Vec2{}),
+              "failed API calls remain distinct from a successful setter/read with a mismatched physical point");
+        Check(snapshot.zoom == 4 && snapshot.speedMultiplier == 0.25 && snapshot.adjustForZoom &&
+                  Same(snapshot.bounds, driver.view.bounds) && Same(snapshot.offset, driver.view.offset) &&
+                  !snapshot.constrained && !snapshot.forwarded,
+              "diagnostic geometry records the initiating policy without inventing drag ownership");
+        Check(snapshot.logicalRead && snapshot.clipRead && Same(snapshot.clip, driver.view.bounds) &&
+                  Same(snapshot.logical, failure == 0 ? Vec2{100, 100} : (failure == 1 ? Vec2{111, 100} : Vec2{101, 100})) &&
+                  driver.native.failureObservations == 1 && Same(driver.native.cursor, {116, 100}),
+              "context is captured at the failed transaction before pass-through advances Windows, with no recovery write");
+        const auto writes = driver.native.writes, observations = driver.native.failureObservations;
+        Check(!driver.Send({132, 100}) && driver.native.writes == writes &&
+                  driver.native.failureObservations == observations &&
+                  driver.adapter.LastFailureDetails().at == snapshot.at &&
+                  Same(driver.adapter.LastFailureDetails().observed, snapshot.observed),
+              "a latched adapter preserves its first evidence without querying or logging every later packet");
+    }
+    Driver healthy;
+    healthy.view.speedMultiplier = 0.25;
+    healthy.Seed();
+    Check(healthy.Send({116, 100}) && !healthy.adapter.LastFailureDetails().valid && healthy.native.failureObservations == 0,
+          "successful compensation performs no diagnostic native observations");
+    healthy.native.ready = false;
+    Check(!healthy.Send({132, 100}) && !healthy.adapter.Faulted() && !healthy.adapter.LastFailureDetails().valid &&
+              healthy.native.failureObservations == 0,
+          "temporary context refusal does not fabricate a failed native transaction");
+}
+
+void DeferredNativeWriteLifecycle() {
+    // Model the measured ordinary-hook ordering: the setter succeeds, but its
+    // immediate physical getter still reports the exact pre-event point.
+    for (const bool synchronousEcho : {false, true}) {
+        Driver d(synchronousEcho);
+        d.view = Enabled(2.200000047683716, {0, 0, 3840, 2160});
+        d.native.cursor = {2011, 809};
+        d.native.deferredWrite = true;
+        Check(d.Send({2011, 813}) && d.adapter.Pending() && !d.adapter.Faulted(),
+              "exact old successful readback owns one original MOVE pending verification");
+        Check(Same(d.native.deferredPoint, {2011, 811}) && !d.adapter.FeedbackSnapshot().valid &&
+                  Same(d.adapter.Remainder(), {}) && d.native.writes == 1,
+              "pending proposal exposes neither unverified fraction nor presentation feedback");
+        Check(d.adapter.BypassEcho(d.native.deferredPoint, d.now) && d.adapter.Pending(),
+              "known setter callback passes without canceling or acknowledging its pending request");
+        Check(!d.adapter.ServicePending(d.now, d.view, true, false, d.native) && d.adapter.Pending(),
+              "read-only service leaves the exact old native point pending without another write");
+        d.native.cursor = d.native.deferredPoint;
+        Check(d.adapter.ServicePending(d.now + 1, d.view, true, false, d.native) && !d.adapter.Pending() &&
+                  d.adapter.FeedbackSnapshot().valid && d.native.writes == 1,
+              "later exact requested physical position commits the existing proposal once");
+        const auto counts = d.adapter.PendingCounts();
+        Check(counts.started == 1 && counts.acknowledged == 1 && counts.interrupted == 0 && counts.expired == 0,
+              "bounded statistics distinguish verified deferred progress");
+        Near(d.adapter.FeedbackSnapshot().point.y + d.adapter.Remainder().y, 809 + 4 / d.view.zoom,
+             "deferred acknowledgement preserves exactly one automatic gain application");
+    }
+    Driver canceledEcho(true);
+    canceledEcho.native.deferredWrite = true;
+    Check(canceledEcho.Send({116, 100}) && canceledEcho.adapter.Pending() && canceledEcho.native.reentries == 1,
+          "synchronous target callback can precede the measured old physical readback");
+    canceledEcho.adapter.Pause();
+    Check(canceledEcho.adapter.BypassEcho(canceledEcho.native.deferredPoint, canceledEcho.now) &&
+              !canceledEcho.adapter.Pending() && !canceledEcho.adapter.FeedbackSnapshot().valid &&
+              Same(canceledEcho.adapter.Remainder(), {}) && canceledEcho.native.writes == 1,
+          "cancellation retains short late-target bypass after a pre-commit synchronous callback without resurrection");
+    Driver interrupted;
+    interrupted.native.deferredWrite = true;
+    Check(interrupted.Send({116, 100}) && interrupted.adapter.Pending(), "intervening-move case starts one pending request");
+    Check(!interrupted.Send({120, 100}) && !interrupted.adapter.Pending() && !interrupted.adapter.Faulted() &&
+              interrupted.native.writes == 1 && Same(interrupted.native.cursor, {120, 100}) &&
+              interrupted.adapter.PendingCounts().interrupted == 1,
+          "a real packet before verification cancels and passes without replay or another write");
+    interrupted.native.cursor = interrupted.native.deferredPoint;
+    Check(!interrupted.adapter.ServicePending(interrupted.now, interrupted.view, true, false, interrupted.native) &&
+              !interrupted.adapter.FeedbackSnapshot().valid && Same(interrupted.adapter.Remainder(), {}),
+          "late completion after real-input cancellation cannot resurrect its discarded fraction");
+
+    Driver committed;
+    committed.native.deferredWrite = true;
+    Check(committed.Send({116, 100}) && committed.adapter.Pending(), "committed physical intervention starts pending request");
+    Check(!committed.Send({120, 103}, true) && !committed.adapter.Pending() && !committed.adapter.Faulted() &&
+              committed.native.writes == 1 && committed.adapter.PendingCounts().interrupted == 1 &&
+              !committed.adapter.FeedbackSnapshot().valid && Same(committed.adapter.Remainder(), {}),
+          "exact fresh already-committed real packet cancels old proposal without latching ordinary adjustment");
+    Driver timerMismatch;
+    timerMismatch.native.deferredWrite = true;
+    Check(timerMismatch.Send({116, 100}) && timerMismatch.adapter.Pending(), "timer-only mismatch starts pending request");
+    timerMismatch.native.cursor = {120, 103};
+    Check(!timerMismatch.adapter.ServicePending(timerMismatch.now, timerMismatch.view, true, false, timerMismatch.native) &&
+              timerMismatch.adapter.FailureReason() == Failure::Readback && timerMismatch.native.writes == 1,
+          "the same third point without an actual new hook packet remains unverified native interference");
+
+    Driver expired;
+    expired.native.deferredWrite = true;
+    const auto startedAt = expired.now;
+    Check(expired.Send({116, 100}) && expired.adapter.Pending(), "expiration case starts pending request");
+    Check(!expired.adapter.ServicePending(startedAt + Adapter::PendingLeaseMs, expired.view, true, false, expired.native) &&
+              expired.adapter.Pending(), "the exact pending deadline remains eligible for verification");
+    Check(!expired.adapter.ServicePending(startedAt + Adapter::PendingLeaseMs + 1, expired.view, true, false, expired.native) &&
+              !expired.adapter.Pending() && expired.adapter.FailureReason() == Failure::Readback &&
+              expired.adapter.PendingCounts().expired == 1 && expired.native.writes == 1,
+          "unverified timeout latches strict failure without a retry or compensating write");
+
+    Driver boundary;
+    boundary.native.deferredWrite = true;
+    Check(boundary.Send({116, 100}) && boundary.adapter.Pending(), "confinement overlap starts pending motion");
+    Check(boundary.adapter.Constrain({2000, 100}, boundary.now, boundary.view, boundary.view.bounds, boundary.native) == ConstraintResult::Failed &&
+              !boundary.adapter.Pending() && boundary.native.writes == 1,
+          "boundary confinement never overlaps another native request still awaiting acknowledgement");
 }
 
 void FractionalAndGainSemantics() {
@@ -808,6 +946,8 @@ void EdgeResidualAndFrameCadenceRegression() {
 
 int main() {
     GeometryAndBoundaryMatrix();
+    NativeFailureCoordinateSnapshots();
+    DeferredNativeWriteLifecycle();
     FractionalAndGainSemantics();
     NativeOrderingAndReentryMatrix();
     GatesAndFailures();

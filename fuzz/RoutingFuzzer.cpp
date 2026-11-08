@@ -4,6 +4,7 @@
 #include "../src/input_routing.h"
 #include "../src/wheel_acceleration.h"
 #include "../src/wheel_activation.h"
+#include "../src/shortcut_commands.h"
 
 #include <algorithm>
 #include <array>
@@ -106,6 +107,184 @@ namespace
             }
         }
     }
+
+    constexpr glide::shortcuts::Command ExpectedShortcut(std::uint32_t key, glide::shortcuts::Modifiers modifiers) noexcept
+    {
+        using glide::shortcuts::Command;
+        // Independent binding oracle: AltGr and Windows-key text combinations
+        // never authorize a command, even if Windows supplies synthetic Ctrl.
+        if (!modifiers.control || !modifiers.leftAlt || modifiers.rightAlt || modifiers.windows)
+            return Command::None;
+        switch (key)
+        {
+        case 'Z':
+            return modifiers.shift ? Command::ToggleDesktop : Command::ToggleMonitor;
+        case glide::input::vk::Equal:
+            return Command::ZoomIn;
+        case 'F':
+            return modifiers.shift ? Command::FitWindow : Command::None;
+        default:
+            break;
+        }
+        if (modifiers.shift)
+            return Command::None;
+        switch (key)
+        {
+        case 'I':
+            return Command::ToggleIndependent;
+        case 'S':
+            return Command::Copy;
+        case 'V':
+            return Command::RevealIndicator;
+        case glide::input::vk::Add:
+            return Command::ZoomIn;
+        case glide::input::vk::Minus:
+        case glide::input::vk::Subtract:
+            return Command::ZoomOut;
+        default:
+            return Command::None;
+        }
+    }
+
+    void FuzzShortcutCommands(const std::uint8_t* data, std::size_t size)
+    {
+        using namespace glide::shortcuts;
+        State state;
+        std::array<bool, 256> down{}, repeatRevoked{};
+        std::array<Command, 256> owned{};
+        std::array<std::uint64_t, 256> acquiredGeneration{};
+        std::uint64_t cancelledGeneration = 0;
+        unsigned ownedCount = 0;
+        const auto cancel = [&]() noexcept {
+            state.Cancel();
+            ++cancelledGeneration;
+        };
+        const auto reset = [&]() noexcept {
+            state.SessionReset();
+            down.fill(false);
+            repeatRevoked.fill(false);
+            owned.fill(Command::None);
+            ownedCount = 0;
+            ++cancelledGeneration;
+        };
+        const auto keyEvent = [&](std::uint32_t key, bool pressed, Modifiers modifiers, bool permitted, bool sinkSucceeds) {
+            const bool known = key < down.size();
+            if (known)
+            {
+                if (!permitted)
+                    ++cancelledGeneration;
+                for (std::size_t index = 0; index < owned.size(); ++index)
+                    if (owned[index] != Command::None && ExpectedShortcut(static_cast<std::uint32_t>(index), modifiers) != owned[index])
+                        repeatRevoked[index] = true;
+            }
+            const bool previous = known && down[key];
+            const Command precedingOwner = known ? owned[key] : Command::None;
+            const bool wasOwned = precedingOwner != Command::None;
+            unsigned sinkCalls = 0;
+            Command posted = Command::None;
+            const auto decision = state.Key(key, pressed, modifiers, permitted, [&](Binding binding, bool fresh) noexcept {
+                if (++sinkCalls > 1 || !known || !pressed || !permitted || modifiers.rightAlt || modifiers.windows ||
+                    binding.key != key || binding.shift != modifiers.shift || binding.command == Command::None ||
+                    binding.command != ExpectedShortcut(key, modifiers))
+                    std::abort();
+                if (fresh)
+                {
+                    if (previous || wasOwned)
+                        std::abort(); // Availability may be reserved once per fresh DOWN only.
+                }
+                else if (!wasOwned || !previous || repeatRevoked[key] || acquiredGeneration[key] != cancelledGeneration ||
+                         (precedingOwner != Command::ZoomIn && precedingOwner != Command::ZoomOut) || binding.command != precedingOwner)
+                    std::abort();
+                if (sinkSucceeds)
+                    posted = binding.command;
+                return sinkSucceeds;
+            });
+            if (decision.command != posted || ((!permitted || modifiers.rightAlt || modifiers.windows) && decision.command != Command::None))
+                std::abort();
+            if (!known)
+            {
+                if (decision.consume || sinkCalls)
+                    std::abort();
+                return;
+            }
+            if (wasOwned)
+            {
+                if (!decision.consume)
+                    std::abort(); // Cancel/disable/modifier changes cannot steal an owned UP.
+                if (!pressed)
+                {
+                    owned[key] = Command::None;
+                    repeatRevoked[key] = false;
+                    --ownedCount;
+                }
+            }
+            else
+            {
+                if (decision.consume != (posted != Command::None) ||
+                    (decision.consume && (!pressed || previous || !permitted)))
+                    std::abort();
+                if (decision.consume)
+                {
+                    owned[key] = posted;
+                    acquiredGeneration[key] = cancelledGeneration;
+                    repeatRevoked[key] = false;
+                    ++ownedCount;
+                }
+            }
+            down[key] = pressed;
+            if (state.ReservedReleasePending() != (ownedCount != 0))
+                std::abort();
+        };
+        constexpr std::array<std::uint32_t, 10> triggers{
+            'Z', 'I', 'S', 'V', 'F', glide::input::vk::Equal, glide::input::vk::Add, glide::input::vk::Minus, glide::input::vk::Subtract, glide::input::vk::RightAlt
+        };
+        // Every input reaches an eligible fresh probe, then AltGr cancellation
+        // and an owned release while disabled, before arbitrary interleavings.
+        const auto first = triggers[size ? data[0] % (triggers.size() - 1) : 0];
+        keyEvent(first, true, { true, true, false, first == 'F', false }, true, true);
+        keyEvent(first, true, { true, true, true, false, false }, true, true);
+        keyEvent(first, false, { true, false, true, false, false }, false, true);
+        if (state.ReservedReleasePending())
+            std::abort();
+
+        // At most 64 operations; each policy scan has exactly 256 key slots.
+        for (std::size_t at = 0; at + 7 < size && at < 512; at += 8)
+        {
+            const unsigned action = data[at] % 7;
+            const unsigned flags = data[at + 2];
+            const Modifiers modifiers{ (flags & 1) != 0, (flags & 2) != 0, (flags & 4) != 0, (flags & 8) != 0, (flags & 16) != 0 };
+            const std::uint32_t key = (data[at + 1] & 1) ? triggers[data[at + 3] % triggers.size()] :
+                                                           ((data[at + 1] & 2) ? data[at + 3] : (std::uint32_t{ data[at + 3] } << 8) | data[at + 4]);
+            if (action <= 2)
+                keyEvent(key, (data[at + 5] & 1) != 0, modifiers, (data[at + 6] & 1) != 0, (data[at + 7] & 1) != 0);
+            else if (action == 3)
+                cancel();
+            else if (action == 4)
+                reset();
+            else if (action == 5)
+            {
+                const bool pressed = (data[at + 5] & 1) != 0;
+                state.Seed(key, pressed);
+                if (key < down.size())
+                    down[key] = pressed;
+            }
+            else
+            {
+                state.ObserveModifiers(modifiers);
+                for (std::size_t index = 0; index < owned.size(); ++index)
+                    if (owned[index] != Command::None && ExpectedShortcut(static_cast<std::uint32_t>(index), modifiers) != owned[index])
+                        repeatRevoked[index] = true;
+            }
+            if (state.ReservedReleasePending() != (ownedCount != 0))
+                std::abort();
+        }
+        cancel();
+        for (std::uint32_t key = 0; key < owned.size(); ++key)
+            if (owned[key] != Command::None)
+                keyEvent(key, false, { true, false, true, true, true }, false, false);
+        if (state.ReservedReleasePending() || ownedCount)
+            std::abort();
+    }
 }
 
 void FuzzRouting(const std::uint8_t* data, std::size_t size)
@@ -115,6 +294,7 @@ void FuzzRouting(const std::uint8_t* data, std::size_t size)
     FuzzWheel(data, size);
     FuzzWheelActivation(data, size);
     FuzzPointerSpeed(data, size);
+    FuzzShortcutCommands(data, size);
     Snapshot snapshot;
     snapshot.enabled = true;
     snapshot.generation = 1;

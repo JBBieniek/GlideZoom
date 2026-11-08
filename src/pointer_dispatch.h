@@ -19,6 +19,36 @@ namespace glide::input
     {
         return ordinary.Recover(now, PointerView(snapshot, false), coherent && enabled && inputGate && inputIdle && routing.ZoomReady() && !routing.AnyButtonDown() && snapshot.epoch == controlsEpoch, native);
     }
+
+    // Verify a previously requested native move even if no new physical packet
+    // arrives. This has the same live authority as dispatch, without recovery's
+    // unrelated-key idle requirement, and can never issue another cursor write.
+    template<class Native>
+    void ServicePointerPending(std::uint64_t now, const PointerSnapshot& snapshot, std::uint64_t controlsEpoch, bool coherent, bool enabled, bool inputGate, bool gestureActive, const routing::State& routing, pointer::Adapter& ordinary, pointer::Adapter& drag, Native& native) noexcept
+    {
+        if (!ordinary.Pending() && !drag.Pending())
+            return;
+        if (!coherent || !routing.ZoomReady() || snapshot.epoch != controlsEpoch || !enabled || !inputGate || gestureActive)
+        {
+            ordinary.Pause();
+            drag.Pause();
+            return;
+        }
+        if (!routing.HasForwardedDrag())
+        {
+            if (drag.Pending())
+                drag.Pause();
+            ordinary.ServicePending(now, PointerView(snapshot, false), true, false, native);
+            return;
+        }
+        if (ordinary.Pending())
+            ordinary.Pause();
+        pointer::DragNative<Native> clipped{ native };
+        if (clipped.Initialize(PointerView(snapshot, true)))
+            drag.ServicePending(now, PointerView(snapshot, true), true, false, clipped);
+        else
+            drag.Pause();
+    }
     // The real hook and composed tests share this decision. Free pointer motion
     // needs no held mouse button; a forwarded application's drag only selects a
     // clip-respecting native adapter. Neither path authorizes a new click.

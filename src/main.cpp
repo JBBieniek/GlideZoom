@@ -62,6 +62,7 @@ constexpr wchar_t kClass[] = L"GlideZoom.Standalone.AccessibilityZoom.1";
 constexpr UINT kTray = WM_APP + 1, kError = WM_APP + 2;
 constexpr UINT kReset = WM_APP + 3, kQuit = WM_APP + 4;
 constexpr UINT kRoutingWake = WM_APP + 5;
+    constexpr UINT kShortcutCommand = WM_APP + 6;
 constexpr UINT_PTR kTimer = 1;
 static_assert(glide::tray::event::ContextMenu == WM_CONTEXTMENU &&
               glide::tray::event::LeftUp == WM_LBUTTONUP &&
@@ -69,13 +70,7 @@ static_assert(glide::tray::event::ContextMenu == WM_CONTEXTMENU &&
               glide::tray::event::RightUp == WM_RBUTTONUP &&
               glide::tray::event::Select == NIN_SELECT &&
               glide::tray::event::KeySelect == NIN_KEYSELECT);
-constexpr int kToggleHotkey = 1, kResetHotkey = 2, kPlusHotkey = 3,
-              kMinusHotkey = 4;
-constexpr int kDesktopHotkey = 5, kCaptureHotkey = 6;
-constexpr int kShiftPlusHotkey = 7, kNumpadPlusHotkey = 8,
-              kNumpadMinusHotkey = 9;
-constexpr int kIndependentHotkey = 10, kScopePreviewHotkey = 11,
-              kFitViewportHotkey = 12;
+constexpr int kResetHotkey = 2;
 constexpr int kShow = 101, kToggle = 102, kResetCommand = 103, kPause = 104,
               kExit = 105;
 constexpr int kDesktopToggle = 106, kCaptureCommand = 107;
@@ -224,6 +219,7 @@ public:
     if (!input_.Start(instance_))
       return Fail(L"Could not start the dedicated input thread.");
     input_.SetRoutingWake(hwnd_, kRoutingWake);
+            input_.SetShortcutWake(hwnd_, kShortcutCommand);
     parkedViews_.reserve(displays_.size());
     monitor_->SetCursorPositionResolver(ResolveCursorPosition, this);
     notificationsRegistered_ =
@@ -500,13 +496,16 @@ private:
       routingPublishFailed_ = true;
   }
 
-  void ReleaseHotkeys() noexcept {
-    for (int id = kToggleHotkey; id <= kFitViewportHotkey; ++id) {
-      if (hotkeys_[id])
-        UnregisterHotKey(hwnd_, id);
-      hotkeys_[id] = false;
-    }
-  }
+  void ReleaseHotkeys() noexcept
+        {
+            for (std::size_t id = 0; id < hotkeys_.size(); ++id)
+            {
+                if (hotkeys_[id])
+                    UnregisterHotKey(hwnd_, static_cast<int>(id));
+                hotkeys_[id] = false;
+            }
+        }
+
 
   bool EnableControls() {
     if (!lifecycle_.PrepareEnable())
@@ -558,46 +557,7 @@ private:
             L"its emergency reset shortcut could not be reserved.");
         return false;
       }
-      hotkeys_[kToggleHotkey] =
-          RegisterShortcut(kToggleHotkey, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
-                           'Z', L"Ctrl+Alt+Z (selected monitor)");
-      hotkeys_[kPlusHotkey] = RegisterShortcut(
-          kPlusHotkey, MOD_CONTROL | MOD_ALT, VK_OEM_PLUS, L"Ctrl+Alt+=");
-      hotkeys_[kMinusHotkey] = RegisterShortcut(
-          kMinusHotkey, MOD_CONTROL | MOD_ALT, VK_OEM_MINUS, L"Ctrl+Alt+-");
-      hotkeys_[kDesktopHotkey] = RegisterShortcut(
-          kDesktopHotkey, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, 'Z',
-          L"Ctrl+Alt+Shift+Z (all monitors)");
-      hotkeys_[kCaptureHotkey] =
-          RegisterShortcut(kCaptureHotkey, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
-                           'S', L"Ctrl+Alt+S");
-      hotkeys_[kShiftPlusHotkey] =
-          RegisterShortcut(kShiftPlusHotkey, MOD_CONTROL | MOD_ALT | MOD_SHIFT,
-                           VK_OEM_PLUS, L"Ctrl+Alt+Shift+= (plus)");
-      hotkeys_[kNumpadPlusHotkey] = RegisterShortcut(
-          kNumpadPlusHotkey, MOD_CONTROL | MOD_ALT, VK_ADD, L"Ctrl+Alt+Num+");
-      hotkeys_[kNumpadMinusHotkey] =
-          RegisterShortcut(kNumpadMinusHotkey, MOD_CONTROL | MOD_ALT,
-                           VK_SUBTRACT, L"Ctrl+Alt+Num-");
-      hotkeys_[kIndependentHotkey] = RegisterShortcut(
-          kIndependentHotkey, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'I',
-          L"Ctrl+Alt+I (independent monitors)");
-      hotkeys_[kScopePreviewHotkey] = RegisterShortcut(
-          kScopePreviewHotkey, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'V',
-          L"Ctrl+Alt+V (scope indicator)");
-      hotkeys_[kFitViewportHotkey] = RegisterShortcut(
-          kFitViewportHotkey, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT,
-          'F', L"Ctrl+Alt+Shift+F (fit active window)");
-      if (!hotkeys_[kToggleHotkey] || !hotkeys_[kPlusHotkey] ||
-          !hotkeys_[kMinusHotkey] || !hotkeys_[kDesktopHotkey] ||
-          !hotkeys_[kCaptureHotkey] || !hotkeys_[kShiftPlusHotkey] ||
-          !hotkeys_[kNumpadPlusHotkey] || !hotkeys_[kNumpadMinusHotkey] ||
-          !hotkeys_[kIndependentHotkey] || !hotkeys_[kScopePreviewHotkey] ||
-          !hotkeys_[kFitViewportHotkey])
-        QueueError(L"An optional zoom or copy-view shortcut is already in use "
-                   L"and was left with its current owner. "
-                   L"The wheel, drag gesture, tray controls and emergency "
-                   L"reset remain available.");
+      Diagnostic(L"Ctrl+Left Alt commands use the keyboard hook; Right Alt/AltGr remains available for typing.");
     }
     if (!lifecycle_.Activate())
       return false;
@@ -1334,8 +1294,9 @@ private:
   void StepZoom(double amount) {
     if (!EnsurePointerView())
       return;
+    // Retain the physical input epoch, as for held Win+Alt steps.
     SetTarget(glide::animation::StepZoom(target_, amount, settings_.maxZoom,
-                                         settings_.zoomMultiplier));
+                                       settings_.zoomMultiplier), false);
   }
 
   void SetTarget(double value, bool cancelInput = true) {
@@ -2231,6 +2192,37 @@ private:
     return true;
   }
 
+  void LogPointerWriteFailures() noexcept
+  {
+      glide::pointer::FailureDetails detail;
+      for (unsigned count = 0; count < 16 && input_.ReadPointerFailureDetails(detail); ++count)
+      {
+          // This is the current owned map, not an atomic fault-time read.
+          const glide::session::Input current = session_.Expected().input;
+          wchar_t text[1900]{};
+          swprintf_s(text,
+                     L"Pointer write details: drag=%u constrained=%u failure=%u time=%llu epoch=%llu zoom=%.9g speed=%.9g automatic=%u "
+                     L"before=(%.0f,%.0f) candidate=(%.0f,%.0f) requested=(%.0f,%.0f) observed=(%.0f,%.0f) "
+                     L"warpOK=%u readOK=%u error=%u logicalOK=%u logical=(%.0f,%.0f) logicalError=%u "
+                     L"clipOK=%u clip=(%.0f,%.0f,%.0f,%.0f) clipError=%u "
+                     L"bounds=(%.0f,%.0f,%.0f,%.0f) offset=(%.9g,%.9g) "
+                     L"currentOwnedMap=%u currentInputEnabled=%u currentSource=(%d,%d,%d,%d) currentDestination=(%d,%d,%d,%d)",
+                     static_cast<unsigned>(detail.forwarded), static_cast<unsigned>(detail.constrained), static_cast<unsigned>(detail.reason),
+                     static_cast<unsigned long long>(detail.at), static_cast<unsigned long long>(detail.epoch),
+                     detail.zoom, detail.speedMultiplier, static_cast<unsigned>(detail.adjustForZoom),
+                     detail.before.x, detail.before.y, detail.candidate.x, detail.candidate.y,
+                     detail.requested.x, detail.requested.y, detail.observed.x, detail.observed.y,
+                     static_cast<unsigned>(detail.warpSucceeded), static_cast<unsigned>(detail.readSucceeded), static_cast<unsigned>(detail.nativeError),
+                     static_cast<unsigned>(detail.logicalRead), detail.logical.x, detail.logical.y, static_cast<unsigned>(detail.logicalError),
+                     static_cast<unsigned>(detail.clipRead), detail.clip.left, detail.clip.top, detail.clip.right, detail.clip.bottom, static_cast<unsigned>(detail.clipError),
+                     detail.bounds.left, detail.bounds.top, detail.bounds.right, detail.bounds.bottom, detail.offset.x, detail.offset.y,
+                     static_cast<unsigned>(session_.OwnsState()), static_cast<unsigned>(current.enabled),
+                     current.source.left, current.source.top, current.source.right, current.source.bottom,
+                     current.destination.left, current.destination.top, current.destination.right, current.destination.bottom);
+          Diagnostic(text, true);
+      }
+  }
+
   void Tick() {
     if (captureRequested_)
       return; // Preparation/capture owns a frozen view, including sent-message
@@ -2246,6 +2238,7 @@ private:
     const ULONGLONG elapsed = now - lastTick_;
     lastTick_ = now;
     const auto pointerFailure = input_.PointerFailureReason();
+    LogPointerWriteFailures();
     if (pointerFailure != reportedPointerFailure_) {
       reportedPointerFailure_ = pointerFailure;
       Diagnostic(glide::pointer::FailureText(pointerFailure),
@@ -2638,11 +2631,11 @@ private:
         L"STATIC",
         L"Left Win + Left Alt + = / -       Tap or hold (also + and numpad)\n"
         L"Chosen modifier + wheel          Uses zoom multiplier below\n"
-        L"Ctrl + Alt + Space (hold)         Move up / down to zoom\n"
-        L"Ctrl + Alt + Z / + Shift + Z      Current monitor / all together\n"
-        L"Ctrl + Alt + I / V                 Independent monitors / view "
+        L"Ctrl + Left Alt + Space (hold)         Move up / down to zoom\n"
+        L"Ctrl + Left Alt + Z / + Shift + Z      Current monitor / all together\n"
+        L"Ctrl + Left Alt + I / V                 Independent monitors / view "
         L"indicator\n"
-        L"Ctrl + Alt + Esc / S              Reset all / copy view (brief 1x "
+        L"Ctrl + Left Alt + Esc / S              Reset all / copy view (brief 1x "
         L"flash)",
         0, 0, 30, 132, 610, 106);
     create(L"STATIC", L"Wheel modifier", 0, 0, 30, 244, 170, 23);
@@ -2712,7 +2705,7 @@ private:
         BS_AUTOCHECKBOX | WS_TABSTOP, kKeyboardGesture, 30, 412, 590, 26);
     mouseGesture_ = create(
         L"BUTTON",
-        L"Ctrl+Alt + left double-click and hold (reserves matching clicks)",
+        L"Ctrl+Left Alt + left double-click and hold (reserves matching clicks)",
         BS_AUTOCHECKBOX | WS_TABSTOP, kMouseGesture, 30, 440, 590, 26);
     touchpadGesture_ = create(
         L"BUTTON", L"Three-finger touchpad double-tap and hold (optional)",
@@ -2875,6 +2868,35 @@ private:
     return context;
   }
 
+  void LogPointerPendingStatistics(
+      const glide::settings::Values &candidate) noexcept {
+    if (settings_.pointerSpeed == candidate.pointerSpeed &&
+        settings_.pointerScaling == candidate.pointerScaling)
+      return;
+    glide::pointer::PendingStatistics ordinary, forwarded;
+    if (!input_.ReadPointerPendingStatistics(ordinary, forwarded))
+      return;
+    wchar_t text[700]{};
+    swprintf_s(
+        text,
+        L"Pointer pending statistics: speed=%d->%d automatic=%u->%u "
+        L"ordinary=(started=%llu acknowledged=%llu interrupted=%llu "
+        L"expired=%llu) "
+        L"drag=(started=%llu acknowledged=%llu interrupted=%llu expired=%llu)",
+        settings_.pointerSpeed, candidate.pointerSpeed,
+        static_cast<unsigned>(settings_.pointerScaling),
+        static_cast<unsigned>(candidate.pointerScaling),
+        static_cast<unsigned long long>(ordinary.started),
+        static_cast<unsigned long long>(ordinary.acknowledged),
+        static_cast<unsigned long long>(ordinary.interrupted),
+        static_cast<unsigned long long>(ordinary.expired),
+        static_cast<unsigned long long>(forwarded.started),
+        static_cast<unsigned long long>(forwarded.acknowledged),
+        static_cast<unsigned long long>(forwarded.interrupted),
+        static_cast<unsigned long long>(forwarded.expired));
+    Diagnostic(text);
+  }
+
   bool ApplySettingsCandidate(const glide::settings::Values &candidate) {
     using Action = glide::settings::update::Action;
     const auto action = glide::settings::update::Classify(
@@ -2895,6 +2917,7 @@ private:
         return false;
       scopeReloadPending_ =
           scopeReloadPending_ || settings_.zoomScope != candidate.zoomScope;
+      LogPointerPendingStatistics(candidate);
       settings_ = candidate;
       if (!ApplyPreferredScope())
         return false;
@@ -2906,6 +2929,7 @@ private:
     }
     const bool inputChanged =
         glide::settings::update::InputChanged(settings_, candidate);
+    LogPointerPendingStatistics(candidate);
     settings_ = candidate;
     if (inputChanged) {
       // Cancel old gesture math, retaining submitted cameras and physical
@@ -3267,7 +3291,7 @@ private:
         Reset();
         return 0;
       }
-      if (message == WM_HOTKEY && wParam != kResetHotkey)
+      if ((message == WM_HOTKEY && wParam != kResetHotkey) || message == kShortcutCommand)
         return 0;
       if (command) {
         if (id == kPause) {
@@ -3296,31 +3320,28 @@ private:
         ServiceFrame();
       return 0;
     case WM_HOTKEY:
-      if (wParam < hotkeys_.size() && hotkeys_[wParam]) {
-        if (wParam == kResetHotkey)
-          Reset();
-        else if (lifecycle_.Ready()) {
-          if (wParam == kToggleHotkey)
-            ToggleScope(glide::view::Scope::Monitor);
-          else if (wParam == kDesktopHotkey)
-            ToggleScope(glide::view::Scope::Desktop);
-          else if (wParam == kIndependentHotkey)
-            ToggleScope(glide::view::Scope::Independent);
-          else if (wParam == kPlusHotkey || wParam == kShiftPlusHotkey ||
-                   wParam == kNumpadPlusHotkey)
-            StepZoom(120);
-          else if (wParam == kMinusHotkey || wParam == kNumpadMinusHotkey)
-            StepZoom(-120);
-          else if (wParam == kCaptureHotkey)
-            CopyZoomedView();
-          else if (wParam == kScopePreviewHotkey)
-            RevealScopeIndicator();
-          else if (wParam == kFitViewportHotkey)
-            FitWindowToViewport();
-        }
-      }
-      return 0;
-    case kReset:
+                if (wParam == kResetHotkey && hotkeys_[kResetHotkey])
+                    Reset();
+                return 0;
+            case kShortcutCommand:
+                if (!deferredReset_ && !deferredQuit_ &&
+                    glide::shortcuts::AcceptPosted(static_cast<std::uint64_t>(wParam), static_cast<std::uint64_t>(lParam), lifecycle_.Epoch(), lifecycle_.Ready()))
+                {
+                    switch (static_cast<glide::shortcuts::Command>(wParam))
+                    {
+                    case glide::shortcuts::Command::ToggleMonitor: ToggleScope(glide::view::Scope::Monitor); break;
+                    case glide::shortcuts::Command::ToggleDesktop: ToggleScope(glide::view::Scope::Desktop); break;
+                    case glide::shortcuts::Command::ToggleIndependent: ToggleScope(glide::view::Scope::Independent); break;
+                    case glide::shortcuts::Command::ZoomIn: StepZoom(120); break;
+                    case glide::shortcuts::Command::ZoomOut: StepZoom(-120); break;
+                    case glide::shortcuts::Command::Copy: CopyZoomedView(); break;
+                    case glide::shortcuts::Command::RevealIndicator: RevealScopeIndicator(); break;
+                    case glide::shortcuts::Command::FitWindow: FitWindowToViewport(); break;
+                    case glide::shortcuts::Command::None: break;
+                    }
+                }
+                return 0;
+            case kReset:
       Reset();
       return 0;
     case kQuit:
