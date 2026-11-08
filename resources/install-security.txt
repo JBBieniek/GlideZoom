@@ -1,0 +1,223 @@
+# Development installation and UIAccess
+
+GlideZoom is a prototype, not a publisher-signed production release. The included
+installer uses the documented Windows UIAccess trust model so a locally built
+application can route clicks to its magnified view. Administrator elevation is
+needed for installation and removal; the installed app uses `asInvoker` with
+UIAccess for normal launching and tray use.
+
+## Install
+
+1. Download `GlideZoom-Setup.exe`. It can run without extracting the source ZIP.
+2. Review this document; the ZIP also contains `scripts/Install.ps1` and source.
+3. Double-click **GlideZoom-Setup.exe** and accept the administrator UAC prompt
+   if you intend to perform this development installation. It is self-contained
+   and does not need neighboring files. The extracted package also retains
+   `Install.cmd` as an alternative.
+4. Choose **Next**, read the disclosure, and select its explicit local signing
+   and trust approval checkbox. **Install** remains disabled until that choice.
+   The elevated wizard then invokes its hidden, noninteractive child script.
+   Legacy `Install.cmd` still requires typed `YES`; there is no silent consent
+   in either interactive route. Command-line automation may pass both documented
+   approval switches; neither switch is accepted on its own.
+5. After success, **Open GlideZoom** delegates to the existing Explorer desktop
+   only after verifying that shell process is not elevated. It does not directly
+   launch the app with setup's token. If that delegation is unavailable, use
+   **Open folder** and double-click **GlideZoom.exe** in Explorer.
+
+Native Windows 10/11 x64 and the included x64 `bin/GlideZoom.exe` are required;
+ARM64 and emulated x64 are not supported by this prototype. Use the
+built-in Windows PowerShell 5.1 through the setup executable or legacy wrapper. The installer makes no
+downloads and creates no Start Menu shortcut, desktop shortcut, or startup entry.
+
+## Self-contained setup executable
+
+`GlideZoom-Setup.exe` has a `requireAdministrator` manifest and embeds exactly
+six payloads: the unsigned app executable, the small unsigned uninstaller
+executable, the install and uninstall PowerShell scripts, the uninstall CMD
+wrapper, and this security document. It is a Windows GUI executable.
+It downloads nothing. Its explicit checkbox authorizes the script's local trust
+procedure; closing or going Back before installation makes no install changes.
+The bootstrap itself does not create certificates or modify magnification state.
+
+After elevation, setup stages those fixed embedded resources in a unique
+protected directory under Program Files. It uses explicit administrator/system
+permissions, validates the staging boundary, and creates files without replacing
+existing ones. The child is the absolute native System32 Windows PowerShell;
+its environment and module path are restricted to trusted system locations.
+Inherited user module paths, profiler configuration, and PATH-based executable
+lookup are not used. These restrictions apply only to the child process.
+
+The existing installer owns installation, trust, its recovery journal, and
+rollback. The bootstrap waits for confirmed child termination before removing
+its own staged files. Cleanup uses exact owned paths rather than recursive
+deletion. A failure or ambiguity is reported; unknown content is preserved.
+An interrupted or force-terminated bootstrap can leave its protected staging
+directory behind. That directory is separate from the installation manifest
+and cannot authorize certificate cleanup. Use the installed uninstaller for
+any installation/trust recovery described below.
+
+All three distributed EXEs remain unsigned prototype files. The setup EXE can
+therefore display an unknown-publisher warning. Successful local installation
+signs the installed GlideZoom app and dedicated uninstaller; it does not sign
+or install the setup executable. The permanent footprint is the five files
+below and one owned Installed apps registration.
+
+During installation, Back/Install/Close cannot start a second transaction or
+abandon a running child. The wizard worker keeps the UI responsive, waits for
+the child and performs the existing protected-stage cleanup. Completion reflects
+both child outcome and stage cleanup; failure details include a retained stage
+path when safe cleanup cannot finish. An existing installation is detected and
+not overwritten; the wizard directs the user to its uninstaller.
+
+## Exact machine changes
+
+The installer creates `%ProgramFiles%\GlideZoom`, retaining the inherited
+Program Files permissions and checking for unexpected write access. It refuses
+to overwrite an existing installation directory and refuses reparse points.
+An existing version must be uninstalled first.
+Permission entries are read directly as SIDs, including inherited entries,
+so a missing account-name mapping is not itself an error. Unexpected write
+permissions, absent verifiable rules, and failed ACL reads still stop installation.
+Install and uninstall share a machine-wide mutex; a second operation exits
+without making changes. An abandoned mutex is released by Windows, and the next
+operation reads and validates the saved installation state again.
+
+It generates one unique RSA 3072-bit, SHA-256, self-signed certificate with a
+nonexportable private key and the code-signing extended key usage only. The
+certificate subject and private-key container contain a random installation ID.
+The exact key name is checked for absence and recorded before creation. Its lifetime is about
+one year. The public certificate is placed in `LocalMachine\Root`, as required
+by the UIAccess trust model. New installations do not add it to TrustedPublisher.
+
+Adding this certificate is a **machine-wide trust decision**. It
+is appropriate only if you intentionally trust this local build and installer.
+This is not proof of the author's identity and does not create a public
+publisher reputation or guarantee that security products will accept the app.
+
+The installer signs both installed executables and verifies them with
+`Get-AuthenticodeSignature`. It then removes the temporary certificate from
+`LocalMachine\My` using `Remove-Item -DeleteKey`, deleting its underlying
+private signing key, and verifies both signatures again. No PFX or private-key
+export is created. It also checks the recorded machine CNG container in the
+Microsoft Software Key Storage Provider and deletes that exact container if it
+remains; completion requires the container to be absent. It then deletes the
+temporary public `.cer` file. The certificate in Root remains until uninstall.
+Without a timestamp, a fresh development installation/signature is needed after
+the certificate expires.
+
+The installer copies its uninstaller into the protected installation directory
+and records the exact installation path, certificate thumbprint, subject,
+serial number, signed-executable hashes, uninstall-script hash, and owned filenames in
+`install-manifest.json`. Each journal update writes a complete UTF-8 file beside
+the manifest, flushes it to disk, then replaces the previous manifest in one file
+operation. A failed write or flush leaves the previous manifest available; a leftover
+temporary file is not silently treated as authoritative state. New manifests
+use schema version 3 and claim no shortcut ownership. A completed installation
+contains only these five files:
+
+- `GlideZoom.exe`
+- `GlideZoom-Uninstall.exe`
+- `Uninstall.ps1`
+- `Uninstall.cmd`
+- `install-manifest.json`
+
+The installer creates the fixed 64-bit registry key
+`HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\GlideZoom` with an
+installation-ID ownership marker, app/version/publisher/location/icon fields,
+estimated size and a quoted `UninstallString`. No Modify/Repair commands are
+advertised. Key creation requires the native **created new key** disposition;
+it never silently opens and overwrites an existing registration. The journal
+records registration intent before mutation. Removal accepts only the exact
+recorded identity, known values and types, and no child keys. It never recursively
+deletes a registry subtree. Another administrator changing that key or a failure
+before its owner marker is written can require manual review; ambiguous data is
+retained, not guessed to belong to GlideZoom.
+
+The temporary `.cer` and manifest `.tmp` names remain recognized for cleanup
+after an interrupted installation. The installer creates no shortcuts and does
+not modify UAC policies, disable signature checks, or enable test-signing mode.
+The wrappers' `-ExecutionPolicy Bypass` applies only to that PowerShell process;
+it does not write a machine or user execution-policy setting.
+
+The app itself requests `asInvoker` with `uiAccess="true"`; installation needs
+administrator permission, but launch it normally from its folder in Explorer after
+the elevated installer has closed. Do not replace the installed binary in place:
+that would invalidate its signature. Rebuild, uninstall, then reinstall.
+
+## Uninstall and failure recovery
+
+Use **Settings > Apps > Installed apps > GlideZoom > Uninstall**, or run the
+installed `GlideZoom-Uninstall.exe`. This small launcher verifies its protected
+path, launches native System32 PowerShell with a restricted environment, and
+exits. The script validates/waits for that exact launcher before removing it.
+It uses a graphical confirmation, progress window and completion/error message;
+cancellation before removal changes nothing. It needs administrator approval.
+The installed or archived `Uninstall.cmd` remains available for recovery and
+legacy installations, with its typed `YES` prompt. The uninstaller
+asks the running app to quit gracefully, validates the exact certificate
+identity in the recorded stores, then removes those entries and its known
+files. It does not terminate unrelated processes or recursively erase unknown
+content. All present installation files are checked before
+changes, including a check for unexpected files or directories. These checks
+are repeated after confirmation and after waiting for the app to exit. A
+reparse point, ambiguous certificate identity, or unknown file stops cleanup
+and preserves the recovery information. Per-user preferences are left in place.
+
+The uninstaller also understands older schema-1 and schema-2 manifests. Only for schema 1,
+it validates the exact legacy Common Programs shortcut path and target before
+removing it, and permits cleanup of the recorded TrustedPublisher certificate.
+A modified legacy shortcut stops cleanup. Schema-2/3 cleanup never inspects or
+deletes a Start Menu shortcut and rejects ownership of TrustedPublisher trust.
+Schema 3 also validates the recorded script/uninstaller hashes when present,
+removes its exact Apps registration, and deletes the now-exited launcher.
+
+If signing or installation fails, rollback attempts to remove this attempt's
+certificate, private key, and known files. Cleanup failures are
+reported, and the manifest and uninstaller are retained when possible. If the
+computer shuts down mid-installation, run the uninstaller from the original
+archive. Preserve the installation directory and manifest until cleanup
+finishes. Do not manually delete the directory first: the manifest is the
+record needed to identify its trust entries precisely. For interruption between
+certificate generation and recording its thumbprint, recovery accepts only one
+certificate with the exact pre-recorded subject, issuer, serial, and code-signing
+purpose. It saves the recovered identity before removal. If generation stopped
+before a certificate appeared, the unique, pre-recorded CNG key container still
+identifies the only key it may remove. Older manifests without that key identity
+can require manual review. No recovery path searches for or deletes certificates
+by a broad name or removes other providers' keys.
+
+File replacement, certificate stores, signing, registry registration and legacy shortcut cleanup are separate
+Windows operations; they cannot form one atomic transaction. The journal makes
+partial completion explicit and allows exact cleanup to be retried. A corrupt
+or missing manifest, an inaccessible store, or failed cleanup stops the script
+and reports the problem; it does not guess ownership. Power loss, storage
+failure, and changes made concurrently by another administrator remain limits
+of this prototype. Do not delete recovery files until cleanup succeeds.
+
+For distribution beyond local development, use an appropriately signed release
+and installer from a verifiable publisher. Do not distribute one reusable
+self-signed private key or install a shared development root certificate on
+other people's computers.
+
+## Microsoft references
+
+- [UIAccess requirements](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-securityoverview)
+- [Magnification API overview](https://learn.microsoft.com/en-us/windows/win32/winauto/magapi/magapi-intro)
+- [New-SelfSignedCertificate](https://learn.microsoft.com/en-us/powershell/module/pki/new-selfsignedcertificate)
+- [Certificate provider and DeleteKey](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/about/about_certificate_provider)
+- [CNG key container access](https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.cngkey)
+- [FileStream.Flush](https://learn.microsoft.com/en-us/dotnet/api/system.io.filestream.flush)
+- [File.Replace](https://learn.microsoft.com/en-us/dotnet/api/system.io.file.replace)
+- [GetAccessRules and SID target types](https://learn.microsoft.com/en-us/dotnet/api/system.security.accesscontrol.commonobjectsecurity.getaccessrules)
+- [PowerShell NullString for .NET string parameters](https://learn.microsoft.com/en-us/dotnet/api/system.management.automation.language.nullstring)
+- [Start-Process and the Open / RunAs verbs](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process)
+
+The scripts have been parsed with PowerShell's own parser and executed under
+PowerShell 7.6.9 on Linux with explicit Windows-boundary mocks. The tests execute
+the production ACL policy and install/uninstall control flow; journal files and
+their replacements use real isolated temporary storage. The mock run found and
+verified fixes for account-name translation and the null-string backup argument
+to File.Replace. See [INSTALLER-TESTING.md](INSTALLER-TESTING.md) and its reports.
+Real Windows certificate stores, ACL writes, signing, and Windows PowerShell 5.1
+execution still require Windows validation.

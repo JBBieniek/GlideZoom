@@ -1,0 +1,18 @@
+foreach(required GLIDEZOOM_SOURCE_DIR GLIDEZOOM_APP_EXE GLIDEZOOM_UNINSTALL_EXE GLIDEZOOM_SETUP_RC)
+  if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
+    message(FATAL_ERROR "Missing ${required} for installer resource generation")
+  endif()
+endforeach()
+if(NOT EXISTS "${GLIDEZOOM_APP_EXE}")
+  message(FATAL_ERROR "Build GlideZoom before embedding the installer payload")
+endif()
+if(NOT EXISTS "${GLIDEZOOM_UNINSTALL_EXE}")
+  message(FATAL_ERROR "Build GlideZoomUninstall before embedding the installer payload")
+endif()
+file(TO_CMAKE_PATH "${GLIDEZOOM_SOURCE_DIR}" GLIDEZOOM_SOURCE_DIR)
+file(TO_CMAKE_PATH "${GLIDEZOOM_APP_EXE}" GLIDEZOOM_APP_EXE)
+file(TO_CMAKE_PATH "${GLIDEZOOM_UNINSTALL_EXE}" GLIDEZOOM_UNINSTALL_EXE)
+configure_file("${GLIDEZOOM_SOURCE_DIR}/src/setup.rc.in" "${GLIDEZOOM_SETUP_RC}" @ONLY)
+# configure_file preserves the timestamp when paths are unchanged, but the
+# binary/script contents at those paths may have changed. Force RC recompilation.
+file(TOUCH "${GLIDEZOOM_SETUP_RC}")

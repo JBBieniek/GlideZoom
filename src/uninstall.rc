@@ -1,0 +1,29 @@
+#include <windows.h>
+1 ICON "glidezoom.ico"
+1 RT_MANIFEST "uninstall.manifest"
+1 VERSIONINFO
+ FILEVERSION 0,6,2,0
+ PRODUCTVERSION 0,6,2,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "CompanyName", "GlideZoom local development build\0"
+   VALUE "FileDescription", "GlideZoom Uninstaller\0"
+   VALUE "FileVersion", "0.6.2\0"
+   VALUE "InternalName", "GlideZoom-Uninstall\0"
+   VALUE "OriginalFilename", "GlideZoom-Uninstall.exe\0"
+   VALUE "ProductName", "GlideZoom\0"
+   VALUE "ProductVersion", "0.6.2\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0409, 1200
+ END
+END
