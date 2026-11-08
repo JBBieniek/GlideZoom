@@ -6,6 +6,7 @@
 #include "input_state.h"
 #include "input_health.h"
 #include "input_routing.h"
+#include "routing_point.h"
 #include "input_transport.h"
 #include "touchpad_hid.h"
 #include "touchpad_state.h"
@@ -150,6 +151,7 @@ namespace glide::input
         bool ReadRoutingFeedback(routing::Feedback& feedback) const noexcept { return routingFeedback_.Read(feedback); }
         void UpdatePointer(const PointerSnapshot& snapshot) noexcept { pointerPublication_.Publish(snapshot); }
         bool PointerFaulted() const noexcept { return pointerFault_.load(std::memory_order_acquire); }
+        std::uint64_t RoutingPhysicalFallbackCount() const noexcept { return routingPhysicalFallbackCount_.load(std::memory_order_acquire); }
         pointer::Failure PointerFailureReason() const noexcept { return pointerFailure_.load(std::memory_order_acquire); }
         // UI-thread consumer. Diagnostic overflow drops records only; it must
         // never interfere with the release ledger or the input-fault policy.
@@ -598,7 +600,36 @@ namespace glide::input
             }
         }
 
-        void Synchronize(std::uint64_t now, const Vec2* physical = nullptr)
+        bool PhysicalRoutingMovePoint(const routing::Snapshot& snapshot, bool coherent, std::uint64_t now, Vec2 raw, Vec2& output) noexcept
+        {
+            if (!routing::NeedsPhysicalMovePoint(snapshot, coherent && InputGate(now), controls_.Epoch(), raw) ||
+                glide::QueryInputDesktop() != glide::InputDesktop::Current)
+                return false;
+            const auto awareness = GetThreadDpiAwarenessContext();
+            if (!AreDpiAwarenessContextsEqual(awareness, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) &&
+                !AreDpiAwarenessContextsEqual(awareness, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE))
+                return false;
+            POINT physical{};
+            if (!GetPhysicalCursorPos(&physical))
+                return false;
+            const HMONITOR monitor = MonitorFromPoint(physical, MONITOR_DEFAULTTONULL);
+            MONITORINFO info{};
+            info.cbSize = sizeof(info);
+            if (!monitor || !GetMonitorInfoW(monitor, &info))
+                return false;
+            const routing::PhysicalPoint live{ true,
+                                               { static_cast<double>(physical.x), static_cast<double>(physical.y) },
+                                               reinterpret_cast<std::uintptr_t>(monitor),
+                                               { static_cast<double>(info.rcMonitor.left), static_cast<double>(info.rcMonitor.top), static_cast<double>(info.rcMonitor.right), static_cast<double>(info.rcMonitor.bottom) } };
+            if (!routing::TryPhysicalMovePoint(snapshot, coherent, controls_.Epoch(), raw, live, output))
+                return false;
+            const auto count = routingPhysicalFallbackCount_.load(std::memory_order_relaxed);
+            if (count != (std::numeric_limits<std::uint64_t>::max)())
+                routingPhysicalFallbackCount_.store(count + 1, std::memory_order_release);
+            return true;
+        }
+
+        void Synchronize(std::uint64_t now, const Vec2* physical = nullptr, bool rawMove = false)
         {
             // Global controls keep their owned hold through ordinary app activation.
             // A focus transition only discards the pointer baseline, never the
@@ -614,7 +645,14 @@ namespace glide::input
             bool havePoint = physical != nullptr;
             Vec2 observed = physical ? *physical : Vec2{};
             if (physical)
-                routing_.ObservePoint(*physical);
+            {
+                Vec2 routePoint = *physical;
+                const bool acceptedRoute = coherent && routeCoherent && !routing_.Faulted() &&
+                                           routing_.Report(false, now).observedGeneration == routeSnapshot.generation;
+                if (rawMove)
+                    PhysicalRoutingMovePoint(routeSnapshot, acceptedRoute, now, *physical, routePoint);
+                routing_.ObservePoint(routePoint);
+            }
             else if (GetPhysicalCursorPos(&cursor))
             {
                 havePoint = true;
@@ -759,6 +797,7 @@ namespace glide::input
             FeedbackScope feedback(*this);
             const auto now = GetTickCount64();
             const Vec2 point{ static_cast<double>(data.pt.x), static_cast<double>(data.pt.y) };
+            const bool routingMove = routing::CanNormalizeMove(message == WM_MOUSEMOVE, (data.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED)) != 0);
             if (message == WM_MOUSEMOVE && pointer_.InWarp())
             {
                 pointer_.ObserveWarp(point);
@@ -789,7 +828,7 @@ namespace glide::input
                 }
                 return false;
             }
-            Synchronize(now, &point);
+            Synchronize(now, &point, routingMove);
             Decision decision;
             routing::Route dragRoute;
             if (message == WM_MOUSEMOVE && routing_.DragConstraint(point, dragRoute))
@@ -1271,6 +1310,7 @@ namespace glide::input
         std::atomic<bool> ready_{ false }, fault_{ false }, stopping_{ false };
         std::atomic<bool> pointerFault_{ false };
         std::atomic<pointer::Failure> pointerFailure_{ pointer::Failure::None };
+        std::atomic<std::uint64_t> routingPhysicalFallbackCount_{ 0 };
         std::atomic<std::uint64_t> uiBeat_{ 0 }, hostBeat_{ 0 };
         std::atomic<TouchpadAvailability> touchpadStatus_{ TouchpadAvailability::Disabled };
         ControlChannel publication_{};

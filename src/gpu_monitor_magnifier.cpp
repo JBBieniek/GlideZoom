@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <limits>
 #include <new>
 #include <vector>
 
@@ -244,6 +245,7 @@ struct GpuMonitorMagnifier::Impl
     glide::gpu::PresentationQueue presentationQueue;
     glide::overlay::OrderGuard orderGuard;
     std::uint64_t epoch = 1;
+    std::uint64_t restagedFrameCount = 0;
     bool initialized = false, roInitialized = false, classReady = false;
     bool windowConfigured = false, pipelineReady = false;
     bool prepared = false, pending = false, layingOut = false, geometryInvalid = false;
@@ -1338,8 +1340,21 @@ bool GpuMonitorMagnifier::Prepare(const glide::monitor::Frame& frame) noexcept
     information.cbSize = sizeof(information);
     if (!selected || !GetMonitorInfoW(selected, &information) || !SameRect(information.rcMonitor, destination))
         return state.Fail(E_INVALIDARG, L"The selected monitor changed. Reset zoom and try again.");
-    const auto preparation = glide::gpu::PrepareDecision(state.staged, state.presentationQueue.HasUnsubmittedGrant(), Matches(frame) && state.pipelineReady && state.monitor == selected && SameRect(state.destination, destination));
-    if (preparation == glide::gpu::Preparation::Reuse)
+    const auto compatible = [&]() noexcept {
+        return state.prepared && state.pipelineReady && !state.geometryInvalid &&
+               state.host && state.windowConfigured && state.gate.Ready() &&
+               state.monitor == selected && SameRect(state.destination, destination) &&
+               state.device && state.context && state.swap && state.target && state.frameLatency &&
+               state.captureDevice && state.captureItem && state.pool && state.session &&
+               state.captured && state.capturedView && state.composition &&
+               state.compositionTarget && state.compositionVisual && state.vertex &&
+               state.desktopShader && state.cursorShader && state.overviewShader &&
+               state.solidShader && state.textShader && state.constants &&
+               state.linearSampler && state.pointSampler && state.cursorBlend && state.rasterizer;
+    };
+    const auto preparation = glide::gpu::PrepareDecision(state.staged, state.presentationQueue.HasUnsubmittedGrant(), Matches(frame), compatible());
+    const bool restaging = preparation == glide::gpu::Preparation::Restage;
+    if (preparation == glide::gpu::Preparation::Reuse || restaging)
     {
         const auto operation = state.epoch;
         RECT actual{};
@@ -1347,19 +1362,24 @@ bool GpuMonitorMagnifier::Prepare(const glide::monitor::Frame& frame) noexcept
             return state.Fail(E_ABORT, L"The staged magnifier window changed before reuse.");
         if (!state.EnsureOrder(false))
             return false;
-        if (state.epoch != operation || !Matches(frame) || !glide::OnInputDesktop())
+        if (state.epoch != operation || !compatible() ||
+            !state.staged || !state.presentationQueue.HasUnsubmittedGrant() ||
+            (!restaging && !Matches(frame)) || !glide::OnInputDesktop())
             return state.Fail(E_ABORT, L"GPU frame reuse was cancelled by a desktop or window change.");
-        // Show refreshes cursor/HUD pixels using this same grant. The camera is
-        // unchanged, but a deferred hook acknowledgement may have taken time.
-        state.stagedReused = true;
-        result_ = S_OK;
-        reason_ = L"";
-        return true;
+        if (!restaging)
+        {
+            // Show refreshes cursor/HUD pixels using this same grant. The camera is
+            // unchanged, but a deferred hook acknowledgement may have taken time.
+            state.stagedReused = true;
+            result_ = S_OK;
+            reason_ = L"";
+            return true;
+        }
     }
     if (preparation == glide::gpu::Preparation::Rebuild)
     {
         // Never reset only the queue bookkeeping after consuming a native
-        // signal. A new geometry needs a new native presentation queue too.
+        // signal. Incompatible resources need a new native presentation queue too.
         Hide();
         state.pipelineReady = false;
         if (Active())
@@ -1367,33 +1387,36 @@ bool GpuMonitorMagnifier::Prepare(const glide::monitor::Frame& frame) noexcept
     }
     state.staged = state.stagedCursor = state.stagedReused = false;
     state.stagedCursorShape = nullptr;
-    if (!state.EnsureWindow())
-        return false;
-    // The hidden initial host must not skip protection checks or appear before
-    // the owner commits its matching input map. Use the requested monitor bounds
-    // while its native layout and prepared image have not been established yet.
-    if (!state.EnsureOrder(false, &destination))
-        return false;
-    if (state.monitor != selected || !SameRect(state.destination, destination) ||
-        state.geometryInvalid || !state.pipelineReady)
+    if (!restaging)
     {
-        Hide();
-        state.Cleanup();
-        state.geometryInvalid = false;
-        const auto layoutEpoch = state.epoch;
-        state.layingOut = true;
-        const bool positioned = SetWindowPos(state.host, HWND_TOPMOST, destination.left, destination.top, static_cast<int>(width), static_cast<int>(height), SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOREDRAW) != FALSE;
-        state.layingOut = false;
-        if (!positioned)
-            return state.Fail(NativeError(), L"Could not position the magnifier on the selected monitor.");
-        RECT actual{};
-        if (!GetWindowRect(state.host, &actual) || !SameRect(actual, destination) ||
-            state.epoch != layoutEpoch || state.geometryInvalid)
-            return state.Fail(E_UNEXPECTED, L"Windows moved or resized the magnifier unexpectedly.");
-        state.destination = destination;
-        state.monitor = selected;
-        if (!state.CreateDevice(selected) || !state.CreatePipeline(width, height))
+        if (!state.EnsureWindow())
             return false;
+        // The hidden initial host must not skip protection checks or appear before
+        // the owner commits its matching input map. Use the requested monitor bounds
+        // while its native layout and prepared image have not been established yet.
+        if (!state.EnsureOrder(false, &destination))
+            return false;
+        if (state.monitor != selected || !SameRect(state.destination, destination) ||
+            state.geometryInvalid || !state.pipelineReady)
+        {
+            Hide();
+            state.Cleanup();
+            state.geometryInvalid = false;
+            const auto layoutEpoch = state.epoch;
+            state.layingOut = true;
+            const bool positioned = SetWindowPos(state.host, HWND_TOPMOST, destination.left, destination.top, static_cast<int>(width), static_cast<int>(height), SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOREDRAW) != FALSE;
+            state.layingOut = false;
+            if (!positioned)
+                return state.Fail(NativeError(), L"Could not position the magnifier on the selected monitor.");
+            RECT actual{};
+            if (!GetWindowRect(state.host, &actual) || !SameRect(actual, destination) ||
+                state.epoch != layoutEpoch || state.geometryInvalid)
+                return state.Fail(E_UNEXPECTED, L"Windows moved or resized the magnifier unexpectedly.");
+            state.destination = destination;
+            state.monitor = selected;
+            if (!state.CreateDevice(selected) || !state.CreatePipeline(width, height))
+                return false;
+        }
     }
     // Hide/retarget intentionally advanced the epoch above. Once resources are
     // established, guard the calls that can service native cancellation.
@@ -1415,7 +1438,10 @@ bool GpuMonitorMagnifier::Prepare(const glide::monitor::Frame& frame) noexcept
         return false;
     if (!state.host || state.geometryInvalid || state.epoch != preparedEpoch || !glide::OnInputDesktop())
         return state.Fail(E_ABORT, L"Magnifier preparation was cancelled by a desktop or window change.");
-    if (!state.ReadyForRender())
+    // A compatible changed crop replaces only the same unsubmitted back buffer.
+    // The held grant is still owed exactly one Present, after the caller commits
+    // its new input map. The last submitted image and its metadata stay intact.
+    if (!restaging && !state.ReadyForRender())
         return false;
     if (!state.host || state.geometryInvalid || state.epoch != preparedEpoch || !glide::OnInputDesktop())
         return state.Fail(E_ABORT, L"GPU readiness was cancelled before preparing the next frame.");
@@ -1448,6 +1474,8 @@ bool GpuMonitorMagnifier::Prepare(const glide::monitor::Frame& frame) noexcept
     state.pending = false;
     if (!state.EnsureOrder(false))
         return false;
+    if (restaging && state.restagedFrameCount != std::numeric_limits<std::uint64_t>::max())
+        ++state.restagedFrameCount;
     result_ = S_OK;
     reason_ = L"";
     return true;
@@ -1641,6 +1669,11 @@ bool GpuMonitorMagnifier::Matches(const glide::monitor::Frame& frame) const noex
 bool GpuMonitorMagnifier::Pending() const noexcept
 {
     return impl_ && impl_->pending;
+}
+
+std::uint64_t GpuMonitorMagnifier::RestagedFrameCount() const noexcept
+{
+    return impl_ ? impl_->restagedFrameCount : 0;
 }
 
 bool GpuMonitorMagnifier::CanRetain(const glide::session::Snapshot& snapshot) noexcept

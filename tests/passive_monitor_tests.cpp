@@ -40,10 +40,10 @@ namespace
         glide::gpu::PresentationQueue queue;
         bool cursorEnabled = true, submittedCursor = false;
         bool visible = false, preparedValid = false, hasSubmitted = false, staged = false, pending = false, stagedReused = false;
-        bool captureReady = true, orderClear = true, presentFails = false;
+        bool captureReady = true, resourcesReady = true, orderClear = true, presentFails = false;
         QueueSignal signal = QueueSignal::Ready;
         std::uint64_t now = 0, sourceVersion = 1, stagedVersion = 0, displayedVersion = 0;
-        unsigned hides = 0, shows = 0, orderChecks = 0, readinessChecks = 0, rebuilds = 0;
+        unsigned hides = 0, shows = 0, presents = 0, orderChecks = 0, readinessChecks = 0, rebuilds = 0, restages = 0;
 
         void SetCursorEnabled(bool enabled) noexcept { cursorEnabled = enabled; }
         bool Active() const noexcept { return visible; }
@@ -65,17 +65,27 @@ namespace
                 Hide();
                 return false;
             }
-            const auto preparation = glide::gpu::PrepareDecision(staged, queue.HasUnsubmittedGrant(), Matches(frame));
+            const bool compatible = preparedValid && resourcesReady && captureReady && prepared.destination == frame.destination;
+            const auto preparation = glide::gpu::PrepareDecision(staged, queue.HasUnsubmittedGrant(), Matches(frame), compatible);
             if (preparation == glide::gpu::Preparation::Reuse)
             {
                 pending = false;
                 stagedReused = true;
                 return true;
             }
+            if (preparation == glide::gpu::Preparation::Restage)
+            {
+                ++restages;
+                prepared = frame;
+                stagedVersion = sourceVersion;
+                stagedReused = pending = false;
+                return true;
+            }
             if (preparation == glide::gpu::Preparation::Rebuild)
             {
                 Hide();
                 ++rebuilds;
+                resourcesReady = true; // Model successful recreation of private resources.
             }
             if (!captureReady)
             {
@@ -105,6 +115,7 @@ namespace
                 Hide();
                 return false;
             }
+            ++presents;
             submitted = prepared;
             submittedCursor = cursorEnabled;
             displayedVersion = stagedVersion;
@@ -292,19 +303,70 @@ namespace
         view.now = 501;
         Check(view.Prepare(frame) && view.queue.HasUnsubmittedGrant(), "prepare the next frame before a requested camera change");
         const auto oldWaits = view.readinessChecks;
-        Check(view.Prepare(changed) && view.rebuilds == 1 && view.hides == 1 && view.readinessChecks == oldWaits + 1 &&
-                  !view.Active() && view.queue.HasUnsubmittedGrant() && view.Show() &&
+        Check(view.Prepare(changed) && view.restages == 1 && view.rebuilds == 0 && view.hides == 0 && view.readinessChecks == oldWaits &&
+                  view.Active() && view.queue.HasUnsubmittedGrant() && view.Show() &&
                   glide::monitor::SameFrame(view.submitted, changed),
-              "a different camera rebuilds the abandoned native queue before acquiring and submitting one fresh grant");
+              "a different crop on the same output redraws the unsubmitted buffer while retaining the visible image and its original grant");
 
         view.now = 502;
-        Check(view.Prepare(changed), "prepare a frame before discovering an un-coverable window");
+        const auto otherOutput = Make({ 1920, 0, 4480, 1440 }, 3);
+        Check(view.Prepare(changed), "acquire a staged image before changing its native output");
+        const auto outputWaits = view.readinessChecks;
+        Check(view.Prepare(otherOutput) && view.rebuilds == 1 && view.hides == 1 && view.readinessChecks == outputWaits + 1 && !view.Active() && view.Show(),
+              "changed output requires private resource recreation and one new readiness grant");
+        Check(view.Prepare(otherOutput), "acquire a staged image before private resources are invalidated");
+        view.resourcesReady = false;
+        const auto resourceWaits = view.readinessChecks;
+        Check(view.Prepare(otherOutput) && view.rebuilds == 2 && view.hides == 2 && view.readinessChecks == resourceWaits + 1 && !view.Active() && view.Show(),
+              "even matching geometry cannot reuse a held grant after private resource incompatibility");
+
+        view.now = 503;
+        Check(view.Prepare(otherOutput), "prepare a frame before discovering an un-coverable window");
         view.orderClear = false;
-        Check(!view.Prepare(changed) && !view.Active() && !view.queue.HasUnsubmittedGrant(),
+        Check(!view.Prepare(otherOutput) && !view.Active() && !view.queue.HasUnsubmittedGrant(),
               "same-frame reuse never skips the current native order check");
-        Check(glide::gpu::PrepareDecision(true, false, true) == glide::gpu::Preparation::Rebuild &&
-                  glide::gpu::PrepareDecision(false, true, true) == glide::gpu::Preparation::Rebuild,
+        Check(glide::gpu::PrepareDecision(true, false, true, true) == glide::gpu::Preparation::Rebuild &&
+                  glide::gpu::PrepareDecision(false, true, true, true) == glide::gpu::Preparation::Rebuild,
               "inconsistent staged/grant ownership cannot authorize reuse or another wait on the old queue");
+    }
+
+    void ChangedPendingCropKeepsTheVisibleImageUntilOneVerifiedSubmission()
+    {
+        Mapping mapping;
+        Journal journal;
+        glide::session::Session owner;
+        Renderer view;
+        const glide::Rect bounds{ -1920, -1080, 0, 0 };
+        const auto original = Make(bounds, 2);
+        Check(glide::monitor::Present(original, view, owner, mapping, journal).result == glide::session::Result::Applied,
+              "establish the visible image and its one journaled input mapping");
+        const auto before = mapping.state;
+        const auto writes = mapping.inputWrites;
+        view.now = 1;
+        auto pending = Make(bounds, 3);
+        Check(view.Prepare(pending) && view.queue.HasUnsubmittedGrant(), "stage the next crop while fresh routing feedback is delayed");
+        const auto waits = view.readinessChecks;
+        const auto presents = view.presents;
+        for (unsigned retry = 0; retry < 12; ++retry)
+        {
+            view.now = 2 + retry;
+            view.sourceVersion = 100 + retry;
+            pending = Make(bounds, 3.1 + retry * 0.05);
+            Check(view.Prepare(pending) && view.queue.HasUnsubmittedGrant() && view.readinessChecks == waits && view.presents == presents,
+                  "changing edge-entry geometry redraws the same backbuffer without another wait or premature Present");
+            Check(view.Active() && view.hides == 0 && view.rebuilds == 0 && glide::monitor::SameFrame(view.submitted, original) && mapping.state == before && mapping.inputWrites == writes,
+                  "the previously submitted pixels and exact old input mapping stay visible while the new crop is uncommitted");
+            Check(!view.CanRetainVisual(pending), "old submitted metadata never certifies the unsubmitted crop");
+        }
+        const auto restages = view.restages;
+        const auto committed = glide::monitor::Present(pending, view, owner, mapping, journal);
+        const glide::session::Snapshot expected{ { 1, 0, 0 }, { true, pending.source, pending.destination } };
+        Check(committed.result == glide::session::Result::Applied && !committed.pending && view.Active() && mapping.state == expected && owner.Expected() == expected,
+              "the production presenter installs only the final crop's exact input mapping before displaying it");
+        Check(view.restages == restages && view.restages == 12 && view.presents == presents + 1 && view.readinessChecks == waits && !view.queue.HasUnsubmittedGrant() && view.hides == 0 && view.rebuilds == 0,
+              "the final verified image consumes exactly one existing grant without hidden cold startup or extra waits");
+        Check(glide::monitor::SameFrame(view.submitted, pending) && view.displayedVersion == 111 && mapping.inputWrites == writes + 1 && mapping.visualWrites == 0 && journal.armed,
+              "latest pixels and submitted metadata advance together while full-desktop magnification and the recovery journal remain correct");
     }
 
     void SharedClassLifetime()
@@ -369,6 +431,7 @@ int main()
     PendingAndCursorHandoff();
     FailuresAreLocalAndDoNotRetainWrongGeometry();
     DeferredPreparationReusesGrantOrRebuilds();
+    ChangedPendingCropKeepsTheVisibleImageUntilOneVerifiedSubmission();
     SharedClassLifetime();
     std::cout << "PASS: " << assertions << " passive monitor assertions; production visual/queue/class policies; no Windows compositor executed\n";
     return 0;

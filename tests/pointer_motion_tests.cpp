@@ -33,8 +33,8 @@ struct Native {
     Adapter* adapter = nullptr;
     View view = Enabled();
     std::uint64_t now = 0;
-    bool ready = true, reachable = true, writeOk = true, wrongReadback = false, deferredWrite = false;
-    Vec2 deferredPoint{};
+    bool ready = true, reachable = true, writeOk = true, wrongReadback = false, deferredWrite = false, forceReadback = false;
+    Vec2 deferredPoint{}, forcedReadback{};
     bool reenter = false, earlyHostBypass = false, pauseDuringWrite = false, pauseDuringReady = false;
     unsigned failReadAt = 0, pauseReadAt = 0, reads = 0, writes = 0, checks = 0, reentries = 0, failureObservations = 0;
     constexpr std::uint32_t LastError() const noexcept { return 1234; }
@@ -72,6 +72,7 @@ struct Native {
         }
         if (pauseDuringWrite) adapter->Pause();
         if (wrongReadback) cursor.x += 10;
+        if (forceReadback) cursor = forcedReadback;
         return true;
     }
 };
@@ -150,6 +151,7 @@ void NativeFailureCoordinateSnapshots() {
         Check(!driver.Send({116, 100}), "failed native compensation still passes the original physical move");
         const FailureDetails snapshot = driver.adapter.LastFailureDetails();
         Check(snapshot.valid && snapshot.reason == (failure == 0 ? Failure::Warp : Failure::Readback) &&
+                  snapshot.phase == FailurePhase::ImmediateWrite && !snapshot.observedOwnedEcho &&
                   snapshot.at == failureAt && snapshot.epoch == driver.view.epoch &&
                   Same(snapshot.before, {100, 100}) && Same(snapshot.candidate, {116, 100}) &&
                   Same(snapshot.requested, {101, 100}),
@@ -182,6 +184,23 @@ void NativeFailureCoordinateSnapshots() {
     Check(!healthy.Send({132, 100}) && !healthy.adapter.Faulted() && !healthy.adapter.LastFailureDetails().valid &&
               healthy.native.failureObservations == 0,
           "temporary context refusal does not fabricate a failed native transaction");
+}
+
+void NativeFailurePhaseAndEchoContext() {
+    for (const bool expired : {false, true}) {
+        Driver d(false);
+        Check(d.Send({116, 100}) && d.Send({120, 100}), "echo context records two readback-verified requested targets");
+        if (expired) d.now += 100;
+        d.native.forceReadback = true;
+        d.native.forcedReadback = {104, 100};
+        Check(!d.Send({124, 100}), "a third-point mismatch still fails without accepting a recent requested target");
+        const FailureDetails details = d.adapter.LastFailureDetails();
+        Check(details.phase == FailurePhase::ImmediateWrite && details.reason == Failure::Readback &&
+                  Same(details.before, {108, 100}) && Same(details.requested, {112, 100}) &&
+                  Same(details.observed, {104, 100}) && details.observedOwnedEcho == !expired &&
+                  !d.adapter.FeedbackSnapshot().valid && d.native.writes == 3,
+              "failure-only context distinguishes a recent exact requested echo from an expired one without changing safety");
+    }
 }
 
 void DeferredNativeWriteLifecycle() {
@@ -244,7 +263,9 @@ void DeferredNativeWriteLifecycle() {
     Check(timerMismatch.Send({116, 100}) && timerMismatch.adapter.Pending(), "timer-only mismatch starts pending request");
     timerMismatch.native.cursor = {120, 103};
     Check(!timerMismatch.adapter.ServicePending(timerMismatch.now, timerMismatch.view, true, false, timerMismatch.native) &&
-              timerMismatch.adapter.FailureReason() == Failure::Readback && timerMismatch.native.writes == 1,
+              timerMismatch.adapter.FailureReason() == Failure::Readback && timerMismatch.native.writes == 1 &&
+              timerMismatch.adapter.LastFailureDetails().phase == FailurePhase::PendingVerification &&
+              !timerMismatch.adapter.LastFailureDetails().observedOwnedEcho,
           "the same third point without an actual new hook packet remains unverified native interference");
 
     Driver expired;
@@ -255,6 +276,7 @@ void DeferredNativeWriteLifecycle() {
               expired.adapter.Pending(), "the exact pending deadline remains eligible for verification");
     Check(!expired.adapter.ServicePending(startedAt + Adapter::PendingLeaseMs + 1, expired.view, true, false, expired.native) &&
               !expired.adapter.Pending() && expired.adapter.FailureReason() == Failure::Readback &&
+              expired.adapter.LastFailureDetails().phase == FailurePhase::PendingVerification &&
               expired.adapter.PendingCounts().expired == 1 && expired.native.writes == 1,
           "unverified timeout latches strict failure without a retry or compensating write");
 
@@ -947,6 +969,7 @@ void EdgeResidualAndFrameCadenceRegression() {
 int main() {
     GeometryAndBoundaryMatrix();
     NativeFailureCoordinateSnapshots();
+    NativeFailurePhaseAndEchoContext();
     DeferredNativeWriteLifecycle();
     FractionalAndGainSemantics();
     NativeOrderingAndReentryMatrix();

@@ -2,6 +2,7 @@
 // Licensed under the MIT license. See LICENSE in the project root.
 
 #include "../src/input_routing.h"
+#include "../src/routing_point.h"
 #include "../src/wheel_acceleration.h"
 #include "../src/wheel_activation.h"
 #include "../src/shortcut_commands.h"
@@ -18,6 +19,105 @@ void FuzzPointerSpeed(const std::uint8_t* data, std::size_t size);
 
 namespace
 {
+    void FuzzPhysicalRoutingPoint(const std::uint8_t* data, std::size_t size)
+    {
+        using namespace glide::input::routing;
+        for (std::size_t at = 0; at + 7 < size && at < 1024; at += 8)
+        {
+            Snapshot snapshot;
+            snapshot.enabled = true;
+            snapshot.generation = 1;
+            snapshot.epoch = 7;
+            snapshot.activeId = 1;
+            snapshot.count = 2;
+            snapshot.routes[0] = { 1, { -1920, 0, 0, 1080 }, { -1440, 270, -480, 810 }, true };
+            snapshot.routes[1] = { 2, { 0, -200, 2560, 1440 }, { 640, 210, 1920, 1030 }, true };
+            const auto index = data[at] & 1u;
+            const auto route = snapshot.routes[index];
+            PhysicalPoint physical{ true, { (route.bounds.left + route.bounds.right) / 2, (route.bounds.top + route.bounds.bottom) / 2 }, route.id, route.bounds };
+            glide::Vec2 raw{ (static_cast<int>(data[at + 1]) - 128) * 32.0, (static_cast<int>(data[at + 2]) - 128) * 16.0 };
+            bool coherent = true;
+            std::uint64_t epoch = 7;
+            switch (data[at + 3] % 14)
+            {
+            case 0:
+                coherent = false;
+                break;
+            case 1:
+                epoch = 8;
+                break;
+            case 2:
+                snapshot.enabled = false;
+                break;
+            case 3:
+                snapshot.generation = 0;
+                break;
+            case 4:
+                physical.read = false;
+                break;
+            case 5:
+                physical.monitorId = 99;
+                break;
+            case 6:
+                ++physical.bounds.right;
+                break;
+            case 7:
+                physical.point.x = physical.bounds.right;
+                break;
+            case 8:
+                physical.point.y = (std::numeric_limits<double>::quiet_NaN)();
+                break;
+            case 9:
+                raw.x = (std::numeric_limits<double>::infinity)();
+                break;
+            case 10:
+                raw.x += 0.5;
+                break;
+            case 11:
+                snapshot.routes[1].id = 1;
+                break;
+            case 12:
+                snapshot.count = MaximumRoutes + 1;
+                break;
+            default:
+                break;
+            }
+            bool expectedNeeds = coherent && snapshot.enabled && snapshot.epoch == epoch && Valid(snapshot) && glide::pointer::ValidPoint(raw);
+            if (expectedNeeds)
+                for (std::size_t routeIndex = 0; routeIndex < snapshot.count; ++routeIndex)
+                    if (glide::pointer::Contains(snapshot.routes[routeIndex].bounds, raw))
+                        expectedNeeds = false;
+            if (NeedsPhysicalMovePoint(snapshot, coherent, epoch, raw) != expectedNeeds)
+                std::abort();
+            bool eligiblePhysical = physical.read && physical.monitorId && glide::pointer::ValidPoint(physical.point) && glide::pointer::ValidBounds(physical.bounds) && glide::pointer::Contains(physical.bounds, physical.point);
+            bool found = false;
+            if (expectedNeeds && eligiblePhysical)
+                for (std::size_t routeIndex = 0; routeIndex < snapshot.count; ++routeIndex)
+                    found = found || (snapshot.routes[routeIndex].id == physical.monitorId && glide::pointer::Same(snapshot.routes[routeIndex].bounds, physical.bounds));
+            const glide::Vec2 untouched{ 123, 456 };
+            glide::Vec2 output = untouched;
+            const bool accepted = TryPhysicalMovePoint(snapshot, coherent, epoch, raw, physical, output);
+            if (accepted != (expectedNeeds && eligiblePhysical && found) ||
+                !glide::pointer::Same(output, accepted ? physical.point : untouched))
+                std::abort();
+            const bool move = (data[at + 4] & 1) != 0, injected = (data[at + 5] & 1) != 0;
+            if (CanNormalizeMove(move, injected) != (move && !injected))
+                std::abort();
+            if (accepted && CanNormalizeMove(move, injected))
+            {
+                State state;
+                state.Observe(snapshot, true, epoch);
+                state.ObservePoint({ -960, 540 });
+                const auto prior = state.Report(true);
+                state.ObservePoint(output);
+                const auto after = state.Report(true);
+                if (after.targetId != physical.monitorId || after.faulted ||
+                    (physical.monitorId == snapshot.activeId && after.requestSerial != prior.requestSerial))
+                    std::abort();
+            }
+        }
+    }
+
     void FuzzWheel(const std::uint8_t* data, std::size_t size)
     {
         glide::wheel::Accelerator accelerator;
@@ -291,6 +391,7 @@ void FuzzRouting(const std::uint8_t* data, std::size_t size)
 {
     using namespace glide::input::routing;
     size = (std::min)(size, std::size_t{ 16384 });
+    FuzzPhysicalRoutingPoint(data, size);
     FuzzWheel(data, size);
     FuzzWheelActivation(data, size);
     FuzzPointerSpeed(data, size);

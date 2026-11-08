@@ -36,6 +36,15 @@ namespace glide::pointer
         Consumed,
         Failed
     };
+    enum class FailurePhase
+    {
+        ImmediateWrite,
+        PendingVerification
+    };
+    inline constexpr const wchar_t* FailurePhaseText(FailurePhase phase) noexcept
+    {
+        return phase == FailurePhase::PendingVerification ? L"pending-verification" : L"immediate-write";
+    }
 
     // One failed native transaction, not a pointer trace. The hook publishes
     // these bounded POD records only when a native failure first latches.
@@ -43,6 +52,10 @@ namespace glide::pointer
     {
         bool valid = false;
         Failure reason = Failure::None;
+        FailurePhase phase = FailurePhase::ImmediateWrite;
+        // An exact recent requested-target match, not proof that the observed
+        // movement originated from our untagged physical setter.
+        bool observedOwnedEcho = false;
         std::uint64_t at = 0, epoch = 0;
         Vec2 before{}, candidate{}, requested{}, observed{};
         Rect bounds{};
@@ -271,7 +284,7 @@ namespace glide::pointer
             // Keep the normal failure record and strict mismatch policy. The
             // initiating coordinates remain separate from this later observation.
             inWarp_ = true;
-            RecordNativeFailure(Failure::Readback, pending_.step, pending_.before, pending_.candidate, pending_.constrained, now, true, read, observed, error, native);
+            RecordNativeFailure(Failure::Readback, FailurePhase::PendingVerification, pending_.step, pending_.before, pending_.candidate, pending_.constrained, now, true, read, observed, error, native);
             inWarp_ = false;
             failedAt_ = now;
             return Fail(Failure::Readback);
@@ -587,11 +600,21 @@ namespace glide::pointer
         }
 
         template<class Native>
-        void RecordNativeFailure(Failure reason, const Step& step, Vec2 before, Vec2 candidate, bool constrained, std::uint64_t now, bool warped, bool read, Vec2 observed, std::uint32_t error, Native& native) noexcept
+        void RecordNativeFailure(Failure reason, FailurePhase phase, const Step& step, Vec2 before, Vec2 candidate, bool constrained, std::uint64_t now, bool warped, bool read, Vec2 observed, std::uint32_t error, Native& native) noexcept
         {
             failureDetails_ = {};
             failureDetails_.valid = true;
             failureDetails_.reason = reason;
+            failureDetails_.phase = phase;
+            if (read && ValidPoint(observed))
+            {
+                for (const auto& echo : echoes_)
+                    if (echo.valid && now >= echo.at && now - echo.at <= EchoLeaseMs && Same(observed, echo.point))
+                    {
+                        failureDetails_.observedOwnedEcho = true;
+                        break;
+                    }
+            }
             failureDetails_.at = now;
             failureDetails_.epoch = view_.epoch;
             failureDetails_.before = before;
@@ -627,7 +650,7 @@ namespace glide::pointer
             const auto readError = read ? std::uint32_t{} : static_cast<std::uint32_t>(NativeError(native, 0));
             if (!warped)
             {
-                RecordNativeFailure(Failure::Warp, step, before, candidate, constrained, now, false, false, observed, warpError, native);
+                RecordNativeFailure(Failure::Warp, FailurePhase::ImmediateWrite, step, before, candidate, constrained, now, false, false, observed, warpError, native);
                 inWarp_ = false;
                 slot->valid = false;
                 failedAt_ = now;
@@ -654,7 +677,7 @@ namespace glide::pointer
             }
             if (!read || !Same(observed, step.point))
             {
-                RecordNativeFailure(Failure::Readback, step, before, candidate, constrained, now, true, read, observed, readError, native);
+                RecordNativeFailure(Failure::Readback, FailurePhase::ImmediateWrite, step, before, candidate, constrained, now, true, read, observed, readError, native);
                 inWarp_ = false;
                 failedAt_ = now;
                 return Fail(Failure::Readback);

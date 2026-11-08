@@ -853,6 +853,43 @@ void PassivePollingHasItsOwnNonblockingDeadline()
           "continual passive congestion expires without refreshing its deadline on every poll");
 }
 
+void CompatibleRestagingPreservesExactlyOneGrant()
+{
+    using glide::gpu::Preparation;
+    for (const bool staged : { false, true })
+        for (const bool grant : { false, true })
+            for (const bool matches : { false, true })
+                for (const bool compatible : { false, true })
+                {
+                    ++scenarios;
+                    const auto actual = glide::gpu::PrepareDecision(staged, grant, matches, compatible);
+                    if (!staged && !grant)
+                        Check(actual == Preparation::Acquire, "an empty stage requires its first native readiness acquisition");
+                    else if (!staged || !grant || !compatible)
+                        Check(actual == Preparation::Rebuild, "incoherent grant or incompatible resources cannot authorize buffer reuse");
+                    else
+                        Check(actual == (matches ? Preparation::Reuse : Preparation::Restage), "one compatible held grant permits exact reuse or changed-crop restaging only");
+                }
+    for (const bool previouslySubmitted : { false, true })
+    {
+        ++scenarios;
+        PresentationQueue queue;
+        if (previouslySubmitted)
+            Grant(queue, 1);
+        Check(queue.Observe(QueueSignal::Ready, 2) == QueueDecision::Render && queue.HasUnsubmittedGrant(), "one native readiness signal owns the staged buffer");
+        const auto cold = queue.Cold();
+        for (unsigned crop = 0; crop < 20; ++crop)
+        {
+            Check(glide::gpu::PrepareDecision(true, queue.HasUnsubmittedGrant(), false, true) == Preparation::Restage && queue.Cold() == cold && queue.HasSubmittedFrame() == previouslySubmitted,
+                  "repeated compatible crop changes retain grant and original submission evidence without another wait");
+        }
+        Check(queue.Submitted(3) && !queue.HasUnsubmittedGrant() && queue.HasSubmittedFrame(), "the final crop consumes the original grant in one Present");
+        Check(!queue.Submitted(3), "compatible restaging cannot authorize a second Present with that same grant");
+        queue.Reset();
+        Check(glide::gpu::PrepareDecision(true, true, true, false) == Preparation::Rebuild && !queue.Submitted(4), "resource replacement discards readiness evidence and cannot submit until a new native acquisition");
+    }
+}
+
 int main()
 {
     InitialAndAcknowledgementDeadlines();
@@ -865,6 +902,7 @@ int main()
     CaptureAndQueueHaveSeparateBoundedStarts();
     CancellationAtEveryAcquisitionBoundary();
     PassivePollingHasItsOwnNonblockingDeadline();
+    CompatibleRestagingPreservesExactlyOneGrant();
     std::cout << "PASS: " << assertions << " GPU queue policy assertions; " << scenarios
               << " scenarios; " << integrationRows
               << " production presenter/session integration rows; simulated compositor; native GPU wait/Present not executed\n";

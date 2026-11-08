@@ -43,6 +43,8 @@ public:
     bool Active() const noexcept;
     bool Matches(const glide::monitor::Frame& frame) const noexcept;
     bool Pending() const noexcept;
+    // UI-thread diagnostic count; survives resource rebuilds and saturates.
+    std::uint64_t RestagedFrameCount() const noexcept;
     bool CanRetain(const glide::session::Snapshot& snapshot) noexcept;
     HWND PaintWindow() const noexcept { return nullptr; }
     bool ReplacementVisibleAt(glide::Vec2 source) const noexcept;

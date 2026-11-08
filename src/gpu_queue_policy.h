@@ -22,17 +22,21 @@ namespace glide::gpu
     {
         Acquire,
         Reuse,
+        Restage,
         Rebuild
     };
 
-    // A rendered but unsubmitted frame owns its native readiness grant. Reusing
-    // identical geometry must not wait again; abandoning it requires a new swap
-    // chain, including when staged metadata and grant ownership disagree.
-    inline constexpr Preparation PrepareDecision(bool staged, bool grant, bool matches) noexcept
+    // A rendered but unsubmitted frame owns its native readiness grant. The same
+    // compatible back buffer may be reused or redrawn without another wait or
+    // submission. Abandoning the buffer requires a new swap chain, including when
+    // staged metadata and grant ownership disagree.
+    inline constexpr Preparation PrepareDecision(bool staged, bool grant, bool matches, bool compatible) noexcept
     {
         if (!staged && !grant)
             return Preparation::Acquire;
-        return staged && grant && matches ? Preparation::Reuse : Preparation::Rebuild;
+        if (!staged || !grant || !compatible)
+            return Preparation::Rebuild;
+        return matches ? Preparation::Reuse : Preparation::Restage;
     }
 
     // A new capture activation may need longer than one frame to wake the display

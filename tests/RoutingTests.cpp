@@ -3,12 +3,15 @@
 
 #include "test_assertions.h"
 #include "../src/input_routing.h"
+#include "../src/routing_point.h"
 #include "../src/pointer_adapter.h"
 #include "../src/zoom_session.h"
 #include "../src/monitor_geometry.h"
 #include "../src/viewport_motion.h"
 
 #include <atomic>
+#include <array>
+#include <limits>
 #include <thread>
 
 using namespace glide_test;
@@ -76,6 +79,215 @@ namespace GlideZoomTests
     class RoutingTests
     {
     public:
+        void VerifiedPhysicalOuterEdgeMoveDoesNotManufactureAHandoff()
+        {
+            using namespace glide::input::routing;
+            struct Edge
+            {
+                glide::Vec2 raw, physical;
+                std::size_t route;
+            };
+            const std::array<Edge, 8> edges{
+                Edge{ { -101, 50 }, { -100, 50 }, 0 }, Edge{ { 200, 50 }, { 199, 50 }, 2 }, Edge{ { -50, -1 }, { -50, 0 }, 0 }, Edge{ { -50, 100 }, { -50, 99 }, 0 }, Edge{ { -101, -1 }, { -100, 0 }, 0 }, Edge{ { -101, 100 }, { -100, 99 }, 0 }, Edge{ { 200, -1 }, { 199, 0 }, 2 }, Edge{ { 200, 100 }, { 199, 99 }, 2 }
+            };
+            for (const auto& edge : edges)
+            {
+                auto snapshot = Routes();
+                const auto& selected = snapshot.routes[edge.route];
+                snapshot.activeId = selected.id;
+                const glide::Vec2 initial{ (selected.bounds.left + selected.bounds.right) / 2, 50 };
+                State original, normalized;
+                original.Observe(snapshot, true, 7);
+                normalized.Observe(snapshot, true, 7);
+                original.ObservePoint(initial);
+                normalized.ObservePoint(initial);
+                original.ObservePoint(edge.raw);
+                Assert::IsTrue(original.Report(true).targetId == 0);
+                original.ObservePoint(edge.physical);
+                const auto falseReturn = original.Report(true);
+                Assert::IsTrue(falseReturn.targetId == selected.id && falseReturn.requestSerial > snapshot.ackSerial);
+
+                MappingBackend native;
+                MappingJournal journal;
+                glide::session::Session session;
+                if (selected.zoomed)
+                    Assert::IsTrue(session.Apply(Mapping(selected), native, journal) == glide::session::Result::Applied);
+                const auto mapping = native.current;
+                const auto writes = native.inputWrites;
+                const PhysicalPoint physical{ true, edge.physical, selected.id, selected.bounds };
+                glide::Vec2 routePoint = edge.raw;
+                Assert::IsTrue(CanNormalizeMove(true, false) && NeedsPhysicalMovePoint(snapshot, true, 7, edge.raw));
+                Assert::IsTrue(TryPhysicalMovePoint(snapshot, true, 7, edge.raw, physical, routePoint));
+                normalized.ObservePoint(routePoint);
+                const auto after = normalized.Report(true);
+                Assert::IsTrue(glide::pointer::Same(routePoint, edge.physical) && after.targetId == selected.id && after.requestSerial == snapshot.ackSerial && normalized.ZoomReady());
+                Assert::IsTrue(native.current == mapping && native.inputWrites == writes);
+                // Canonical routing does not expand the source crop or grant a click.
+                Assert::IsTrue(normalized.BlockNewButton() == selected.zoomed);
+                Assert::IsTrue(normalized.Button(0, true, false) == selected.zoomed);
+                Assert::IsTrue(normalized.Button(0, false, false) == selected.zoomed);
+            }
+        }
+
+        void PhysicalFallbackPreservesRealMonitorEntriesAndRejectsUnknownTopology()
+        {
+            using namespace glide::input::routing;
+            const auto snapshot = Routes();
+            const PhysicalPoint previous{ true, { -50, 50 }, 1, snapshot.routes[0].bounds };
+            for (const glide::Vec2 raw : { glide::Vec2{ 0, 50 }, glide::Vec2{ 50, 50 }, glide::Vec2{ 100, 50 }, glide::Vec2{ 199, 99 } })
+            {
+                glide::Vec2 output{ 777, 888 };
+                Assert::IsFalse(NeedsPhysicalMovePoint(snapshot, true, 7, raw));
+                Assert::IsFalse(TryPhysicalMovePoint(snapshot, true, 7, raw, previous, output));
+                Assert::IsTrue(glide::pointer::Same(output, glide::Vec2{ 777, 888 }));
+                State hook;
+                hook.Observe(snapshot, true, 7);
+                hook.ObservePoint({ -50, 50 });
+                hook.ObservePoint(raw);
+                const auto report = hook.Report(true);
+                Assert::IsTrue(report.requestSerial == 1 && report.targetId == (raw.x < 100 ? 2u : 3u));
+            }
+            const glide::Vec2 raw{ 200, 50 };
+            const PhysicalPoint actualOther{ true, { 150, 50 }, 3, snapshot.routes[2].bounds };
+            glide::Vec2 output{ 777, 888 };
+            Assert::IsTrue(TryPhysicalMovePoint(snapshot, true, 7, raw, actualOther, output));
+            State transferred;
+            transferred.Observe(snapshot, true, 7);
+            transferred.ObservePoint({ -50, 50 });
+            transferred.ObservePoint(output);
+            Assert::IsTrue(transferred.Report(true).targetId == 3 && transferred.Report(true).requestSerial == 1);
+
+            auto gap = snapshot;
+            gap.routes[1].bounds.top = gap.routes[1].source.top = 20;
+            const PhysicalPoint stillInGap{ true, { 50, 10 }, 2, gap.routes[1].bounds };
+            output = { 777, 888 };
+            Assert::IsTrue(NeedsPhysicalMovePoint(gap, true, 7, { 50, 10 }));
+            Assert::IsFalse(TryPhysicalMovePoint(gap, true, 7, { 50, 10 }, stillInGap, output));
+            Assert::IsTrue(glide::pointer::Same(output, glide::Vec2{ 777, 888 }));
+        }
+
+        void PhysicalMoveFallbackRefusesStaleMalformedAndChangedMonitorEvidence()
+        {
+            using namespace glide::input::routing;
+            for (unsigned scenario = 0; scenario < 22; ++scenario)
+            {
+                auto snapshot = Routes();
+                bool coherent = true;
+                std::uint64_t epoch = 7;
+                glide::Vec2 raw{ -101, 50 }, output{ 777, 888 };
+                PhysicalPoint physical{ true, { -100, 50 }, 1, snapshot.routes[0].bounds };
+                switch (scenario)
+                {
+                case 0:
+                    coherent = false;
+                    break;
+                case 1:
+                    epoch = 8;
+                    break;
+                case 2:
+                    snapshot.enabled = false;
+                    break;
+                case 3:
+                    snapshot.generation = 0;
+                    break;
+                case 4:
+                    snapshot.count = 0;
+                    break;
+                case 5:
+                    snapshot.routes[1].id = 1;
+                    break;
+                case 6:
+                    snapshot.routes[1].bounds.left = -1;
+                    break;
+                case 7:
+                    raw.x = (std::numeric_limits<double>::quiet_NaN)();
+                    break;
+                case 8:
+                    raw.x = -100.5;
+                    break;
+                case 9:
+                    raw.x = -262145;
+                    break;
+                case 10:
+                    physical.read = false;
+                    break;
+                case 11:
+                    physical.monitorId = 0;
+                    break;
+                case 12:
+                    physical.monitorId = 99;
+                    break;
+                case 13:
+                    physical.point.x = -100.5;
+                    break;
+                case 14:
+                    physical.point.x = (std::numeric_limits<double>::infinity)();
+                    break;
+                case 15:
+                    physical.point.x = 0;
+                    break; // Exclusive edge belongs to another monitor.
+                case 16:
+                    physical.bounds.left = -101;
+                    break;
+                case 17:
+                    physical.bounds.right = -1;
+                    break;
+                case 18:
+                    physical.bounds.top = -1;
+                    break;
+                case 19:
+                    physical.bounds.bottom = 101;
+                    break;
+                case 20:
+                    physical.bounds.left = physical.bounds.right;
+                    break;
+                case 21:
+                    physical.bounds.left = -100.5;
+                    break;
+                }
+                if (scenario < 10)
+                    Assert::IsFalse(NeedsPhysicalMovePoint(snapshot, coherent, epoch, raw));
+                else
+                    Assert::IsTrue(NeedsPhysicalMovePoint(snapshot, coherent, epoch, raw));
+                Assert::IsFalse(TryPhysicalMovePoint(snapshot, coherent, epoch, raw, physical, output));
+                Assert::IsTrue(glide::pointer::Same(output, glide::Vec2{ 777, 888 }));
+            }
+        }
+
+        void OnlyUninjectedMovementCanRequestFallbackAndOwedReleasesRemainNative()
+        {
+            using namespace glide::input::routing;
+            const auto snapshot = Routes();
+            const PhysicalPoint physical{ true, { -100, 50 }, 1, snapshot.routes[0].bounds };
+            for (const bool move : { false, true })
+                for (const bool injected : { false, true })
+                {
+                    glide::Vec2 observed{ -101, 50 };
+                    unsigned nativeRequests = 0;
+                    if (CanNormalizeMove(move, injected) && NeedsPhysicalMovePoint(snapshot, true, 7, observed))
+                    {
+                        ++nativeRequests;
+                        Assert::IsTrue(TryPhysicalMovePoint(snapshot, true, 7, observed, physical, observed));
+                    }
+                    Assert::IsTrue(nativeRequests == (move && !injected ? 1u : 0u));
+                    Assert::IsTrue(glide::pointer::Same(observed, move && !injected ? physical.point : glide::Vec2{ -101, 50 }));
+                }
+            State hook;
+            hook.Observe(snapshot, true, 7);
+            hook.ObservePoint({ -50, 50 });
+            Assert::IsFalse(hook.Button(0, true, false));
+            glide::Vec2 canonical{ -101, 50 };
+            Assert::IsTrue(TryPhysicalMovePoint(snapshot, true, 7, canonical, physical, canonical));
+            hook.ObservePoint(canonical);
+            Assert::IsTrue(hook.HasForwardedDrag() && hook.Report(true).requestSerial == 0);
+            Assert::IsFalse(hook.Button(0, false, false));
+            Assert::IsFalse(hook.AnyButtonDown());
+            // Actual button/wheel observations remain raw and retain the normal gate.
+            hook.ObservePoint({ 50, 50 });
+            Assert::IsTrue(hook.BlockNewButton() && hook.BlockWheel(true));
+            Assert::IsTrue(hook.Button(0, true, false) && hook.Button(0, false, false));
+        }
+
         void EntryRequestsHandoffAndFirstUnreadyClickKeepsItsPair()
         {
             using namespace glide::input::routing;
@@ -618,11 +830,16 @@ namespace GlideZoomTests
     };
 }
 
+
 int main()
 {
     try
     {
         GlideZoomTests::RoutingTests suite;
+        suite.VerifiedPhysicalOuterEdgeMoveDoesNotManufactureAHandoff();
+        suite.PhysicalFallbackPreservesRealMonitorEntriesAndRejectsUnknownTopology();
+        suite.PhysicalMoveFallbackRefusesStaleMalformedAndChangedMonitorEvidence();
+        suite.OnlyUninjectedMovementCanRequestFallbackAndOwedReleasesRemainNative();
         suite.EntryRequestsHandoffAndFirstUnreadyClickKeepsItsPair();
         suite.BusyBarrierWaitsForForwardedPairsAndNeverStealsARepeat();
         suite.OutsideZoomRemainsNativeAndDisabledModeRetainsOwedUps();
@@ -637,7 +854,7 @@ int main()
         suite.CommitRequiresCurrentGenerationEpochAndRecentHookAcknowledgement();
         suite.PauseOrQueuedCaptureKeepsVisibleRoutesGatedUntilIdentityIsVerified();
         suite.PublicationRejectsInvalidGeometryAndPreservesCoherentSnapshots();
-        std::cout << "PASS: RoutingTests (14 methods)\n";
+        std::cout << "PASS: RoutingTests (18 methods)\n";
         return 0;
     }
     catch (const std::exception& error)

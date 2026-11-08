@@ -2192,35 +2192,54 @@ private:
     return true;
   }
 
-  void LogPointerWriteFailures() noexcept
-  {
-      glide::pointer::FailureDetails detail;
-      for (unsigned count = 0; count < 16 && input_.ReadPointerFailureDetails(detail); ++count)
-      {
-          // This is the current owned map, not an atomic fault-time read.
-          const glide::session::Input current = session_.Expected().input;
-          wchar_t text[1900]{};
-          swprintf_s(text,
-                     L"Pointer write details: drag=%u constrained=%u failure=%u time=%llu epoch=%llu zoom=%.9g speed=%.9g automatic=%u "
-                     L"before=(%.0f,%.0f) candidate=(%.0f,%.0f) requested=(%.0f,%.0f) observed=(%.0f,%.0f) "
-                     L"warpOK=%u readOK=%u error=%u logicalOK=%u logical=(%.0f,%.0f) logicalError=%u "
-                     L"clipOK=%u clip=(%.0f,%.0f,%.0f,%.0f) clipError=%u "
-                     L"bounds=(%.0f,%.0f,%.0f,%.0f) offset=(%.9g,%.9g) "
-                     L"currentOwnedMap=%u currentInputEnabled=%u currentSource=(%d,%d,%d,%d) currentDestination=(%d,%d,%d,%d)",
-                     static_cast<unsigned>(detail.forwarded), static_cast<unsigned>(detail.constrained), static_cast<unsigned>(detail.reason),
-                     static_cast<unsigned long long>(detail.at), static_cast<unsigned long long>(detail.epoch),
-                     detail.zoom, detail.speedMultiplier, static_cast<unsigned>(detail.adjustForZoom),
-                     detail.before.x, detail.before.y, detail.candidate.x, detail.candidate.y,
-                     detail.requested.x, detail.requested.y, detail.observed.x, detail.observed.y,
-                     static_cast<unsigned>(detail.warpSucceeded), static_cast<unsigned>(detail.readSucceeded), static_cast<unsigned>(detail.nativeError),
-                     static_cast<unsigned>(detail.logicalRead), detail.logical.x, detail.logical.y, static_cast<unsigned>(detail.logicalError),
-                     static_cast<unsigned>(detail.clipRead), detail.clip.left, detail.clip.top, detail.clip.right, detail.clip.bottom, static_cast<unsigned>(detail.clipError),
-                     detail.bounds.left, detail.bounds.top, detail.bounds.right, detail.bounds.bottom, detail.offset.x, detail.offset.y,
-                     static_cast<unsigned>(session_.OwnsState()), static_cast<unsigned>(current.enabled),
-                     current.source.left, current.source.top, current.source.right, current.source.bottom,
-                     current.destination.left, current.destination.top, current.destination.right, current.destination.bottom);
-          Diagnostic(text, true);
-      }
+  void LogPointerWriteFailures() noexcept {
+    glide::pointer::FailureDetails detail;
+    for (unsigned count = 0;
+         count < 16 && input_.ReadPointerFailureDetails(detail); ++count) {
+      // This is the current owned map, not an atomic fault-time read.
+      const glide::session::Input current = session_.Expected().input;
+      wchar_t text[1900]{};
+      swprintf_s(
+          text,
+          L"Pointer write details: drag=%u constrained=%u failure=%u phase=%s "
+          L"observedOwnedEcho=%u time=%llu epoch=%llu zoom=%.9g speed=%.9g "
+          L"automatic=%u "
+          L"before=(%.0f,%.0f) candidate=(%.0f,%.0f) requested=(%.0f,%.0f) "
+          L"observed=(%.0f,%.0f) "
+          L"warpOK=%u readOK=%u error=%u logicalOK=%u logical=(%.0f,%.0f) "
+          L"logicalError=%u "
+          L"clipOK=%u clip=(%.0f,%.0f,%.0f,%.0f) clipError=%u "
+          L"bounds=(%.0f,%.0f,%.0f,%.0f) offset=(%.9g,%.9g) "
+          L"currentOwnedMap=%u currentInputEnabled=%u "
+          L"currentSource=(%d,%d,%d,%d) currentDestination=(%d,%d,%d,%d)",
+          static_cast<unsigned>(detail.forwarded),
+          static_cast<unsigned>(detail.constrained),
+          static_cast<unsigned>(detail.reason),
+          glide::pointer::FailurePhaseText(detail.phase),
+          static_cast<unsigned>(detail.observedOwnedEcho),
+          static_cast<unsigned long long>(detail.at),
+          static_cast<unsigned long long>(detail.epoch), detail.zoom,
+          detail.speedMultiplier, static_cast<unsigned>(detail.adjustForZoom),
+          detail.before.x, detail.before.y, detail.candidate.x,
+          detail.candidate.y, detail.requested.x, detail.requested.y,
+          detail.observed.x, detail.observed.y,
+          static_cast<unsigned>(detail.warpSucceeded),
+          static_cast<unsigned>(detail.readSucceeded),
+          static_cast<unsigned>(detail.nativeError),
+          static_cast<unsigned>(detail.logicalRead), detail.logical.x,
+          detail.logical.y, static_cast<unsigned>(detail.logicalError),
+          static_cast<unsigned>(detail.clipRead), detail.clip.left,
+          detail.clip.top, detail.clip.right, detail.clip.bottom,
+          static_cast<unsigned>(detail.clipError), detail.bounds.left,
+          detail.bounds.top, detail.bounds.right, detail.bounds.bottom,
+          detail.offset.x, detail.offset.y,
+          static_cast<unsigned>(session_.OwnsState()),
+          static_cast<unsigned>(current.enabled), current.source.left,
+          current.source.top, current.source.right, current.source.bottom,
+          current.destination.left, current.destination.top,
+          current.destination.right, current.destination.bottom);
+      Diagnostic(text, true);
+    }
   }
 
   void Tick() {
@@ -2880,12 +2899,16 @@ private:
     swprintf_s(
         text,
         L"Pointer pending statistics: speed=%d->%d automatic=%u->%u "
+        L"routingPhysicalFallbacks=%llu restagedFrames=%llu "
         L"ordinary=(started=%llu acknowledged=%llu interrupted=%llu "
         L"expired=%llu) "
         L"drag=(started=%llu acknowledged=%llu interrupted=%llu expired=%llu)",
         settings_.pointerSpeed, candidate.pointerSpeed,
         static_cast<unsigned>(settings_.pointerScaling),
         static_cast<unsigned>(candidate.pointerScaling),
+        static_cast<unsigned long long>(input_.RoutingPhysicalFallbackCount()),
+        static_cast<unsigned long long>(
+            monitor_ ? monitor_->RestagedFrameCount() : 0),
         static_cast<unsigned long long>(ordinary.started),
         static_cast<unsigned long long>(ordinary.acknowledged),
         static_cast<unsigned long long>(ordinary.interrupted),
