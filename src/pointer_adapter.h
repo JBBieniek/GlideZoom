@@ -56,6 +56,8 @@ namespace glide::pointer
         // An exact recent requested-target match, not proof that the observed
         // movement originated from our untagged physical setter.
         bool observedOwnedEcho = false;
+        bool observedEligibleEcho = false;
+        std::uint64_t observedEchoAgeMs = 0;
         std::uint64_t at = 0, epoch = 0;
         Vec2 before{}, candidate{}, requested{}, observed{};
         Rect bounds{};
@@ -194,6 +196,7 @@ namespace glide::pointer
         {
             pending_.valid = false;
             InvalidateFeedback();
+            InvalidateEchoPolicy();
             if (pauseVersion_ != std::numeric_limits<std::uint64_t>::max())
                 ++pauseVersion_;
             else if (failure_ == Failure::None)
@@ -217,9 +220,9 @@ namespace glide::pointer
             }
         }
 
-        // A successful physical setter can still read back the exact old point
-        // while its low-level hook is on the stack. Only a later exact physical
-        // observation under the same policy acknowledges that one request. No
+        // A successful physical setter can still read back the pre-write point
+        // or a recent verified target from the same uninterrupted policy. Only
+        // a later exact physical observation acknowledges the newest request. No
         // native write, waiting, or movement replay occurs in this verifier.
         template<class Native>
         bool ServicePending(std::uint64_t now, const View& view, bool permitted, bool gestureActive, Native& native, const Vec2* interveningCandidate = nullptr) noexcept
@@ -261,6 +264,7 @@ namespace glide::pointer
                 }
                 const Step step = pending_.step;
                 const auto generation = pending_.feedbackGeneration;
+                AcceptEcho(step.point, pending_.at);
                 pending_.valid = false;
                 Increment(pendingStatistics_.acknowledged);
                 Commit(step, now, generation);
@@ -277,7 +281,7 @@ namespace glide::pointer
                 Pause();
                 return false;
             }
-            if (!expired && read && Same(observed, pending_.before))
+            if (!expired && read && (Same(observed, pending_.before) || RecentAcceptedTarget(observed, now)))
                 return false;
             if (expired)
                 Increment(pendingStatistics_.expired);
@@ -412,7 +416,8 @@ namespace glide::pointer
                 Pause();
             if (seeded_ && now - lastAt_ > BaselineLeaseMs)
                 Pause();
-            view_ = view;
+            if (!ObservePolicy(view))
+                return false;
 
             // The physical setter has no event cookie. A possible echo is only
             // bypassed, never consumed or adjusted. A delayed echo to an older
@@ -527,7 +532,8 @@ namespace glide::pointer
             if (Contains(limit, candidate))
                 return ConstraintResult::Passed;
             Pause();
-            view_ = view;
+            if (!ObservePolicy(view))
+                return ConstraintResult::Failed;
             const auto version = pauseVersion_, generation = feedbackGeneration_;
             if (!native.Ready(view) || pauseVersion_ != version)
                 return ConstraintResult::Failed;
@@ -568,6 +574,41 @@ namespace glide::pointer
                    Same(a.bounds, b.bounds) && a.zoom == b.zoom && Same(a.offset, b.offset) &&
                    a.edgePanMultiplier == b.edgePanMultiplier && a.speedMultiplier == b.speedMultiplier &&
                    a.adjustForZoom == b.adjustForZoom;
+        }
+        void InvalidateEchoPolicy() noexcept
+        {
+            if (echoPolicyGeneration_ >= (std::numeric_limits<std::uint64_t>::max)() - 1)
+            {
+                echoPolicyGeneration_ = (std::numeric_limits<std::uint64_t>::max)();
+                if (failure_ == Failure::None)
+                    failure_ = Failure::Generation;
+            }
+            else
+                ++echoPolicyGeneration_;
+        }
+        bool ObservePolicy(const View& view) noexcept
+        {
+            if (!SamePolicy(view_, view))
+                InvalidateEchoPolicy();
+            if (Faulted())
+                return false;
+            view_ = view;
+            return true;
+        }
+        bool RecentAcceptedTarget(Vec2 point, std::uint64_t now, const Echo* excluded = nullptr) const noexcept
+        {
+            for (const auto& echo : echoes_)
+                if (&echo != excluded && echo.valid && echo.accepted &&
+                    echo.policyGeneration == echoPolicyGeneration_ && now >= echo.at &&
+                    now - echo.at <= EchoLeaseMs && Same(point, echo.point))
+                    return true;
+            return false;
+        }
+        void AcceptEcho(Vec2 point, std::uint64_t at) noexcept
+        {
+            for (auto& echo : echoes_)
+                if (echo.policyGeneration == echoPolicyGeneration_ && echo.at == at && Same(echo.point, point))
+                    echo.accepted = true;
         }
         template<class Native>
         static auto NativeLimit(Native& native, int) noexcept -> decltype(native.Limit())
@@ -611,8 +652,12 @@ namespace glide::pointer
                 for (const auto& echo : echoes_)
                     if (echo.valid && now >= echo.at && now - echo.at <= EchoLeaseMs && Same(observed, echo.point))
                     {
+                        const auto age = now - echo.at;
+                        if (!failureDetails_.observedOwnedEcho || age < failureDetails_.observedEchoAgeMs)
+                            failureDetails_.observedEchoAgeMs = age;
                         failureDetails_.observedOwnedEcho = true;
-                        break;
+                        failureDetails_.observedEligibleEcho = failureDetails_.observedEligibleEcho ||
+                                                               (echo.accepted && echo.policyGeneration == echoPolicyGeneration_);
                     }
             }
             failureDetails_.at = now;
@@ -641,7 +686,7 @@ namespace glide::pointer
             // race, fail open and stop; never repeatedly restore against that owner.
             synchronousEcho_ = false;
             warpPoint_ = step.point;
-            *slot = { step.point, now, true };
+            *slot = { step.point, now, true, false, echoPolicyGeneration_ };
             inWarp_ = true;
             const bool warped = native.Warp(step.point);
             const auto warpError = warped ? std::uint32_t{} : static_cast<std::uint32_t>(NativeError(native, 0));
@@ -658,12 +703,13 @@ namespace glide::pointer
             }
             if (synchronousEcho_)
                 slot->valid = false;
-            if (!constrained && read && Same(observed, before) && !Same(observed, step.point) &&
-                version == pauseVersion_ && !Faulted())
+            if (!constrained && read && !Same(observed, step.point) &&
+                version == pauseVersion_ && !Faulted() &&
+                (Same(observed, before) || RecentAcceptedTarget(observed, now, slot)))
             {
-                // A measured pre-commit getter is neither a successful commit
-                // nor arbitrary interference. Own just this original packet;
-                // later service must confirm the exact requested physical point.
+                // The pre-write point or recent accepted policy target does not
+                // acknowledge this write. Own just this original packet; later
+                // service must confirm the exact requested physical point.
                 pending_ = { true, constrained, step, view_, before, candidate, NativeLimit(native, 0), now, version, feedbackGeneration };
                 pending_.hasLimit = ValidBounds(pending_.limit);
                 // An observed callback did not yet commit the physical point.
@@ -688,6 +734,7 @@ namespace glide::pointer
             // state or consume the original move after that cancellation.
             if (pauseVersion_ != version || Faulted())
                 return false;
+            slot->accepted = !constrained;
             Commit(step, now, feedbackGeneration);
             return true;
         }
@@ -696,7 +743,8 @@ namespace glide::pointer
         {
             Vec2 point{};
             std::uint64_t at = 0;
-            bool valid = false;
+            bool valid = false, accepted = false;
+            std::uint64_t policyGeneration = 0;
         };
         struct PendingWrite
         {
@@ -716,7 +764,7 @@ namespace glide::pointer
         std::array<Echo, 1024> echoes_{};
         View view_{};
         Vec2 expected_{}, remainder_{}, warpPoint_{};
-        std::uint64_t lastAt_ = 0, pauseVersion_ = 0, feedbackGeneration_ = 0;
+        std::uint64_t lastAt_ = 0, pauseVersion_ = 0, feedbackGeneration_ = 0, echoPolicyGeneration_ = 0;
         Failure failure_ = Failure::None;
         FailureDetails failureDetails_{};
         PendingWrite pending_{};

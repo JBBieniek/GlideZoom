@@ -13,6 +13,99 @@
 
 namespace
 {
+    void HistoricalReadbacks(const std::uint8_t* data, std::size_t size)
+    {
+        using namespace glide;
+        struct Native
+        {
+            Vec2 point{ 10000, 10000 }, requested{}, historical{};
+            bool delayed = false, readable = true;
+            unsigned writes = 0;
+            bool Ready(const pointer::View&) const noexcept { return true; }
+            bool Read(Vec2& output) const noexcept
+            {
+                output = point;
+                return readable;
+            }
+            bool CanPlace(Vec2) const noexcept { return true; }
+            bool Warp(Vec2 value) noexcept
+            {
+                ++writes;
+                requested = value;
+                point = delayed ? historical : value;
+                return true;
+            }
+        };
+        for (std::size_t at = 0; at + 3 < size && at < 128; at += 4)
+        {
+            Native native;
+            pointer::Adapter adapter;
+            pointer::View view{ true, true, { 0, 0, 40000, 40000 }, 2.0 + data[at] % 63, 7 };
+            if (!adapter.Move({ 10256, 10000 }, false, 100, view, true, false, native))
+                std::abort();
+            native.historical = native.point;
+            if (!adapter.Move({ native.point.x + 256, 10000 }, false, 101, view, true, false, native))
+                std::abort();
+            const unsigned history = data[at + 1] % 4;
+            const std::uint64_t start = history == 1 ? 165 : 102;
+            if (history == 2)
+                adapter.Pause();
+            if (history == 3)
+                ++view.epoch;
+            native.delayed = true;
+            const bool consumed = adapter.Move({ native.point.x + 256, 10000 }, false, start, view, true, false, native);
+            if (native.writes != 3 || adapter.FeedbackSnapshot().valid)
+                std::abort();
+            if (history != 0)
+            {
+                // Identical coordinates from expired or canceled history are
+                // still interference, not authority for a pending proposal.
+                if (consumed || adapter.Pending() || adapter.FailureReason() != pointer::Failure::Readback)
+                    std::abort();
+                continue;
+            }
+            if (!consumed || !adapter.Pending() || adapter.Faulted() || adapter.PendingCounts().acknowledged != 0)
+                std::abort();
+            const unsigned action = data[at + 2] % 8;
+            const std::uint64_t now = start + data[at + 3] % 40;
+            auto current = view;
+            if (action == 0)
+                native.point = native.requested;
+            if (action == 2)
+                native.point.x += 2000;
+            if (action == 3)
+                native.readable = false;
+            if (action == 5)
+                ++current.epoch;
+            if (action == 6)
+                adapter.Pause();
+            if (action == 7)
+            {
+                native.point.x += 2000;
+                if (adapter.Move(native.point, false, now, current, true, false, native) ||
+                    adapter.Pending() || adapter.Faulted() || adapter.PendingCounts().interrupted != 1)
+                    std::abort();
+            }
+            const bool accepted = adapter.ServicePending(now, current, action != 4, false, native);
+            const bool expected = action == 0 && now - start <= pointer::Adapter::PendingLeaseMs;
+            if (accepted != expected || native.writes != 3 ||
+                adapter.FeedbackSnapshot().valid != expected ||
+                adapter.PendingCounts().acknowledged != (expected ? 1u : 0u))
+                std::abort();
+            if (adapter.Pending())
+            {
+                // Repeated history cannot extend the original request's lease,
+                // even if the exact new target appears after its deadline.
+                if (action != 1 || adapter.ServicePending(start + 32, current, true, false, native) || !adapter.Pending())
+                    std::abort();
+                native.point = native.requested;
+                if (adapter.ServicePending(start + 33, current, true, false, native) ||
+                    adapter.Pending() || adapter.FailureReason() != pointer::Failure::Readback || native.writes != 3)
+                    std::abort();
+            }
+        }
+    }
+
     void DeferredWrites(const std::uint8_t* data, std::size_t size)
     {
         using namespace glide;
@@ -201,6 +294,7 @@ void FuzzPointerSpeed(const std::uint8_t* data, std::size_t size)
     size = (std::min)(size, std::size_t{ 16384 });
     Recovery(data, size);
     DeferredWrites(data, size);
+    HistoricalReadbacks(data, size);
     for (std::size_t at = 0; at + 7 < size && at < 4096; at += 8)
     {
         pointer::View view{ true, true, { -1000, -1000, 1000, 1000 }, 1, 7 };

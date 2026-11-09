@@ -2202,7 +2202,8 @@ private:
       swprintf_s(
           text,
           L"Pointer write details: drag=%u constrained=%u failure=%u phase=%s "
-          L"observedOwnedEcho=%u time=%llu epoch=%llu zoom=%.9g speed=%.9g "
+          L"observedOwnedEcho=%u observedEligibleEcho=%u observedEchoAgeMs=%llu "
+          L"time=%llu epoch=%llu zoom=%.9g speed=%.9g "
           L"automatic=%u "
           L"before=(%.0f,%.0f) candidate=(%.0f,%.0f) requested=(%.0f,%.0f) "
           L"observed=(%.0f,%.0f) "
@@ -2217,6 +2218,8 @@ private:
           static_cast<unsigned>(detail.reason),
           glide::pointer::FailurePhaseText(detail.phase),
           static_cast<unsigned>(detail.observedOwnedEcho),
+          static_cast<unsigned>(detail.observedEligibleEcho),
+          static_cast<unsigned long long>(detail.observedEchoAgeMs),
           static_cast<unsigned long long>(detail.at),
           static_cast<unsigned long long>(detail.epoch), detail.zoom,
           detail.speedMultiplier, static_cast<unsigned>(detail.adjustForZoom),

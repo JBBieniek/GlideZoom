@@ -39,7 +39,7 @@ namespace
         std::array<PointerMockMonitor, 2> monitors{ PointerMockMonitor{ { -1920, 0, 0, 1080 } }, PointerMockMonitor{ { 0, -200, 2560, 1440 } } };
         PointerMockDesktop thread{ L"Default" }, input{ L"Default" };
         DPI_AWARENESS_CONTEXT awareness = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
-        POINT physical{ -1500, 500 }, logical{ -777, 333 }, requested{}, pending{};
+        POINT physical{ -1500, 500 }, logical{ -777, 333 }, requested{}, pending{}, historicalReadback{};
         // Explicit, independent seams for a future measured native contract.
         // Identity is the default; these tests assume no Mag/hook ordering.
         RECT inputSource{ -1600, 100, -1120, 370 }, inputDestination{ -1920, 0, 0, 1080 };
@@ -48,6 +48,7 @@ namespace
         unsigned physicalReads = 0, logicalReads = 0, clipReads = 0, writes = 0;
         unsigned opens = 0, closes = 0, monitorQueries = 0, pointQueries = 0;
         unsigned failPhysicalAt = 0, failClipAt = 0;
+        unsigned historicalReadAt = 0, historicalReadsRemaining = 0;
         bool openOk = true, threadNameOk = true, inputNameOk = true;
         bool clipOk = true, logicalOk = true, warpOk = true;
         bool monitorFound = true, monitorInfoOk = true;
@@ -447,6 +448,96 @@ namespace
         Check(!changedClip.Pending() && !changedClip.Faulted() && !changedClip.FeedbackSnapshot().valid && world.writes == 1, "a rebuilt drag wrapper cannot acknowledge a proposal made under a different application clip");
     }
 
+    void AcceptedOlderNativeTargetsAreDeferredWithoutAcknowledgingThem()
+    {
+        for (const bool forwarded : { false, true })
+        {
+            Reset();
+            NativeOps system;
+            if (forwarded)
+                world.clip = { -1700, 100, -100, 900 };
+            DragNative<NativeOps> clipped(system);
+            const auto view = Selected();
+            Check(!forwarded || clipped.Initialize(view), "owned native history retains its application clip");
+            const auto sequence = [&](auto& native) {
+                Adapter adapter;
+                Check(adapter.Move({ -1484, 500 }, false, 100, view, true, false, native) &&
+                          adapter.Move({ -1480, 500 }, false, 101, view, true, false, native),
+                      "two verified production NativeOps writes create accepted targets at-1496 and-1492");
+                world.deferWrite = true;
+                world.historicalReadAt = world.physicalReads + 2; // Preserve the baseline; override only post-setter reads.
+                world.historicalReadsRemaining = 2;
+                world.historicalReadback = { -1496, 500 };
+                Check(adapter.Move({ -1475, 500 }, false, 102, view, true, false, native) && adapter.Pending() && !adapter.Faulted(),
+                      "native success reading a distinct older accepted target starts bounded pending instead of permanent fallback");
+                Check(SamePoint(world.requested, POINT{ -1488, 500 }) && !adapter.FeedbackSnapshot().valid && Same(adapter.Remainder(), Vec2{}) && world.writes == 3,
+                      "old owned readback never acknowledges the latest request, publishes its fraction or retries the native setter");
+                Check(!adapter.ServicePending(103, view, true, false, native) && adapter.Pending() && !adapter.Faulted() && world.writes == 3,
+                      "read-only timer waits for the newest target while the same accepted older receipt remains live");
+                Check(ApplyPending(), "Windows explicitly delivers the newest deferred target");
+                Check(adapter.ServicePending(104, view, true, false, native) && !adapter.Pending() && !adapter.Faulted(),
+                      "exact latest production physical readback is the only owned-history acknowledgement");
+                const auto feedback = adapter.FeedbackSnapshot();
+                Check(feedback.valid && Same(feedback.point, Vec2{ -1488, 500 }) && feedback.remainder.x == 0.25 &&
+                          adapter.PendingCounts().started == 1 && adapter.PendingCounts().acknowledged == 1 && world.writes == 3,
+                      "ordinary and forwarded native paths publish the latest target and fraction once without extra cursor writes");
+            };
+            if (forwarded)
+                sequence(clipped);
+            else
+                sequence(system);
+        }
+
+        for (unsigned rejection = 0; rejection < 8; ++rejection)
+        {
+            Reset();
+            NativeOps native;
+            Adapter adapter;
+            auto view = Selected();
+            if (rejection == 1)
+                world.physical = { -1492, 500 }; // Same readback coordinate, but no accepted history exists.
+            else
+                Check(adapter.Move({ -1484, 500 }, false, 100, view, true, false, native) &&
+                          adapter.Move({ -1480, 500 }, false, 101, view, true, false, native),
+                      "native refusal fixture records two accepted earlier targets");
+            std::uint64_t now = 102;
+            switch (rejection)
+            {
+            case 0:
+                now = 165;
+                break; // The older target at100 is65ms old.
+            case 2:
+                adapter.Pause();
+                break;
+            case 3:
+                ++view.epoch;
+                break;
+            case 4:
+                view.speedMultiplier = 0.5;
+                break;
+            case 5:
+                ++view.offset.x;
+                break;
+            case 6:
+                view.zoom = 2;
+                break;
+            case 7:
+                view.edgePanMultiplier = 2;
+                break;
+            default:
+                break;
+            }
+            world.deferWrite = true;
+            world.historicalReadAt = world.physicalReads + 2;
+            world.historicalReadsRemaining = 1;
+            world.historicalReadback = { -1496, 500 };
+            const auto writes = world.writes;
+            Check(!adapter.Move({ -1475, 500 }, false, now, view, true, false, native) && !adapter.Pending() && adapter.FailureReason() == Failure::Readback &&
+                      !adapter.FeedbackSnapshot().valid && Same(adapter.Remainder(), Vec2{}) && world.writes == writes + 1,
+                  "actual NativeOps refuses an expired, absent, canceled or different-policy old coordinate as current requested-target history");
+        }
+    }
+
     void DeferredDispatchPreservesDragRelease()
     {
         Reset();
@@ -666,7 +757,13 @@ BOOL GetPhysicalCursorPos(POINT* output) noexcept
         world.error = ERROR_DEVICE_NOT_CONNECTED;
         return FALSE;
     }
-    *output = world.physicalGetterMap ? world.physicalGetterMap(world.physical, world.inputSource, world.inputDestination) : world.physical;
+    POINT observed = world.physical;
+    if (world.historicalReadsRemaining && world.physicalReads >= world.historicalReadAt)
+    {
+        observed = world.historicalReadback;
+        --world.historicalReadsRemaining;
+    }
+    *output = world.physicalGetterMap ? world.physicalGetterMap(observed, world.inputSource, world.inputDestination) : observed;
     return TRUE;
 }
 BOOL GetCursorPos(POINT* output) noexcept
@@ -715,6 +812,7 @@ int main()
     PhysicalApiCoordinatesAndPlacement();
     FailureObservationAndAdapterTransactions();
     DeferredNativeWriteAcknowledgement();
+    AcceptedOlderNativeTargetsAreDeferredWithoutAcknowledgingThem();
     DeferredDispatchPreservesDragRelease();
     std::cout << "PASS: " << assertions << " production NativeOps boundary assertions\n";
     return 0;
